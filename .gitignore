@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.pnpm-store/
+.vercel/
+.env
+.env.*
+!.env.ejemplo
+*.log
+*.mp4

@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "api/ai/evaluate.js": {
+      "maxDuration": 300
+    },
+    "api/jobs/notifications.js": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/jobs/notifications",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
