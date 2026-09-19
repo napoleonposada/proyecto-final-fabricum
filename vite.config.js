@@ -6,7 +6,4 @@ export default defineConfig({
   server: {
     hmr: { overlay: false },
   },
-  optimizeDeps: {
-    noDiscovery: true,
-  },
 })

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { formatCurrency, cloneDemoState } from './lib/demoData.js'
-import { getCurrentUser, isDemoMode, supabase } from './lib/supabase.js'
+import { getCurrentProfile, getCurrentUser, isDemoMode, supabase } from './lib/supabase.js'
 
 const navItems = [
   { id: 'dashboard', label: 'Resumen', icon: 'grid' },
@@ -61,7 +61,7 @@ async function loadRemoteState() {
   const documentsByContest = {}
   for (const document of documentsResult.data || []) documentsByContest[document.contest_id] ||= document
   const milestonesByContest = {}
-  for (const milestone of milestonesResult.data || []) (milestonesByContest[milestone.contest_id] ||= []).push({ label: milestone.name, date: formatDate(milestone.due_at), done: new Date(milestone.due_at) < new Date() })
+  for (const milestone of milestonesResult.data || []) (milestonesByContest[milestone.contest_id] ||= []).push({ label: milestone.name, date: formatDate(milestone.due_at), dueAt: milestone.due_at, milestoneType: milestone.milestone_type, done: new Date(milestone.due_at) < new Date() })
   const proposalsByContest = {}
   for (const proposal of proposalsResult.data || []) (proposalsByContest[proposal.contest_id] ||= []).push({ ...proposal, supplier: suppliersById[proposal.supplier_id]?.name || 'Proveedor', amount: Number(proposal.total_amount), result: proposal.status === 'NO_APTA' ? 'NO_APTA' : proposal.status === 'APTA' ? 'APTA' : 'PENDIENTE', reason: 'Revisión pendiente de la evaluación IA.', review: 'Pendiente' })
   const contests = (contestsResult.data || []).map((contest) => {
@@ -75,7 +75,7 @@ async function loadRemoteState() {
 
 function App() {
   const [state, setState] = useState(cloneDemoState)
-  const [auth, setAuth] = useState(() => isDemoMode ? { loading: false, user: { id: 'demo-manager', full_name: 'María Salazar' }, error: null } : { loading: true, user: null, error: null })
+  const [auth, setAuth] = useState(() => isDemoMode ? { loading: false, user: { id: 'demo-manager', full_name: 'María Salazar' }, profile: { id: 'demo-manager', full_name: 'María Salazar', role: 'GESTOR', supplier_id: null }, error: null } : { loading: true, user: null, profile: null, error: null })
   const [section, setSection] = useState('dashboard')
   const [selectedId, setSelectedId] = useState('c-014')
   const [detailTab, setDetailTab] = useState('resumen')
@@ -87,8 +87,10 @@ function App() {
     let active = true
     getCurrentUser().then(async (user) => {
       if (!active) return
-      if (!user) return setAuth({ loading: false, user: null, error: 'Inicia sesión para acceder al área de compras.' })
-      setAuth({ loading: false, user, error: null })
+      if (!user) return setAuth({ loading: false, user: null, profile: null, error: 'Inicia sesión para acceder al área de compras.' })
+      let profile
+      try { profile = await getCurrentProfile(user.id) } catch (profileError) { return setAuth({ loading: false, user: null, profile: null, error: `No se pudo cargar tu perfil: ${profileError.message}` }) }
+      setAuth({ loading: false, user, profile, error: null })
       try {
         const remote = await loadRemoteState()
         if (active && remote.contests.length) {
@@ -98,15 +100,20 @@ function App() {
       } catch (error) {
         if (active) setToast({ message: `No se pudieron cargar los datos de Supabase: ${error.message}`, tone: 'error' })
       }
-    }).catch((error) => active && setAuth({ loading: false, user: null, error: error.message }))
+    }).catch((error) => active && setAuth({ loading: false, user: null, profile: null, error: error.message }))
     const subscription = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session?.user && active) setAuth({ loading: false, user: null, error: 'La sesión expiró. Vuelve a iniciar sesión.' })
+      if (!session?.user && active) setAuth({ loading: false, user: null, profile: null, error: 'La sesión expiró. Vuelve a iniciar sesión.' })
     })
     return () => { active = false; subscription.data.subscription.unsubscribe() }
   }, [])
 
   const selectedContest = state.contests.find((contest) => contest.id === selectedId) || state.contests[0]
+  const isSupplier = auth.profile?.role === 'PROVEEDOR' && Boolean(auth.profile?.supplier_id)
   const unread = state.notifications.filter((notification) => notification.unread).length
+
+  useEffect(() => {
+    if (!isSupplier && section === 'portal') setSection('dashboard')
+  }, [isSupplier, section])
 
   const notify = (message, tone = 'success') => {
     setToast({ message, tone })
@@ -123,9 +130,15 @@ function App() {
   }
 
   const createContest = async (form) => {
+    const milestones = (form.milestones || []).filter((milestone) => milestone.name && milestone.dueAt).map((milestone) => ({ ...milestone, dueAt: new Date(milestone.dueAt).toISOString() }))
+    const deadlineMilestone = milestones.find((milestone) => milestone.milestoneType === 'CIERRE') || milestones.find((milestone) => milestone.name.toLowerCase().includes('cierre'))
     if (!isDemoMode) {
-      const { data, error } = await supabase.from('contests').insert({ code: `CMP-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`, title: form.title, status: 'BORRADOR', reference_budget: Number(form.budget), currency_code: 'PEN', tax_included: true, created_by: auth.user.id }).select('id, code, title, status, reference_budget, currency_code, proposal_deadline').single()
+      const { data, error } = await supabase.from('contests').insert({ code: `CMP-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`, title: form.title, status: 'BORRADOR', reference_budget: Number(form.budget), currency_code: 'PEN', tax_included: true, proposal_deadline: deadlineMilestone?.dueAt || null, created_by: auth.user.id }).select('id, code, title, status, reference_budget, currency_code, proposal_deadline').single()
       if (error) return notify(error.message, 'error')
+      if (milestones.length) {
+        const { error: milestoneError } = await supabase.from('contest_milestones').insert(milestones.map((milestone) => ({ contest_id: data.id, name: milestone.name, milestone_type: milestone.milestoneType, due_at: milestone.dueAt, starts_at: milestone.startsAt ? new Date(milestone.startsAt).toISOString() : null })))
+        if (milestoneError) return notify(`Concurso creado, pero no se pudo guardar el cronograma: ${milestoneError.message}`, 'error')
+      }
       if (form.basesFile) {
         try {
           const { data: sessionData } = await supabase.auth.getSession()
@@ -144,17 +157,54 @@ function App() {
           if (documentError) throw documentError
         } catch (documentError) { notify(`Borrador creado, pero las bases no se pudieron validar: ${documentError.message}`, 'error') }
       }
-      setState((current) => ({ ...current, contests: [{ id: data.id, code: data.code, title: data.title, status: data.status, statusLabel: 'Borrador', category: form.category, budget: Number(data.reference_budget), currency: data.currency_code, deadline: data.proposal_deadline || new Date(Date.now() + 14 * 864e5).toISOString(), invited: 0, submitted: 0, progress: 0, manager: auth.user.full_name || 'Gestor autenticado', bases: form.bases || 'Pendiente de carga', requirements: 0, aiReady: 0, milestones: [], offers: [] }, ...current.contests] }))
+      setState((current) => ({ ...current, contests: [{ id: data.id, code: data.code, title: data.title, status: data.status, statusLabel: 'Borrador', category: form.category, budget: Number(data.reference_budget), currency: data.currency_code, deadline: data.proposal_deadline || new Date(Date.now() + 14 * 864e5).toISOString(), invited: 0, submitted: 0, progress: 0, manager: auth.user.full_name || 'Gestor autenticado', bases: form.bases || 'Pendiente de carga', requirements: 0, aiReady: 0, milestones: milestones.map((milestone) => ({ label: milestone.name, date: formatDate(milestone.dueAt), dueAt: milestone.dueAt, milestoneType: milestone.milestoneType, done: false })), offers: [] }, ...current.contests] }))
       setModal(null); setSection('contests'); return notify('Borrador persistido en Supabase.')
     }
     const id = `c-${Date.now()}`
     setState((current) => ({
       ...current,
-      contests: [{ id, code: `CMP-2026-${String(current.contests.length + 16).padStart(3, '0')}`, title: form.title, status: 'BORRADOR', statusLabel: 'Borrador', category: form.category, budget: Number(form.budget), currency: 'PEN', deadline: new Date(Date.now() + 14 * 864e5).toISOString(), invited: 0, submitted: 0, progress: 8, manager: 'María Salazar', bases: form.bases || 'Pendiente de carga', requirements: 0, aiReady: 0, milestones: [], offers: [] }, ...current.contests],
+      contests: [{ id, code: `CMP-2026-${String(current.contests.length + 16).padStart(3, '0')}`, title: form.title, status: 'BORRADOR', statusLabel: 'Borrador', category: form.category, budget: Number(form.budget), currency: 'PEN', deadline: deadlineMilestone?.dueAt || new Date(Date.now() + 14 * 864e5).toISOString(), invited: 0, submitted: 0, progress: 8, manager: 'María Salazar', bases: form.bases || 'Pendiente de carga', requirements: 0, aiReady: 0, milestones: milestones.map((milestone) => ({ label: milestone.name, date: formatDate(milestone.dueAt), dueAt: milestone.dueAt, milestoneType: milestone.milestoneType, done: false })), offers: [] }, ...current.contests],
     }))
     setModal(null)
     setSection('contests')
     notify('Borrador creado. Completa las bases y el cronograma para publicar.')
+  }
+
+  const updateDraftContest = async (form) => {
+    const milestones = (form.milestones || []).filter((milestone) => milestone.name && milestone.dueAt).map((milestone) => ({ ...milestone, dueAt: new Date(milestone.dueAt).toISOString() }))
+    const deadlineMilestone = milestones.find((milestone) => milestone.milestoneType === 'CIERRE') || milestones.find((milestone) => milestone.name.toLowerCase().includes('cierre'))
+    if (!isDemoMode) {
+      const { error } = await supabase.from('contests').update({ title: form.title, reference_budget: Number(form.budget), proposal_deadline: deadlineMilestone?.dueAt || null }).eq('id', selectedId).eq('status', 'BORRADOR')
+      if (error) return notify(error.message, 'error')
+      const { error: deleteMilestonesError } = await supabase.from('contest_milestones').delete().eq('contest_id', selectedId)
+      if (deleteMilestonesError) return notify(`No se pudo actualizar el cronograma: ${deleteMilestonesError.message}`, 'error')
+      if (milestones.length) {
+        const { error: milestoneError } = await supabase.from('contest_milestones').insert(milestones.map((milestone) => ({ contest_id: selectedId, name: milestone.name, milestone_type: milestone.milestoneType, due_at: milestone.dueAt, starts_at: milestone.startsAt ? new Date(milestone.startsAt).toISOString() : null })))
+        if (milestoneError) return notify(`No se pudo guardar el cronograma: ${milestoneError.message}`, 'error')
+      }
+      if (form.basesFile) {
+        try {
+          const { data: sessionData } = await supabase.auth.getSession()
+          const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }
+          const uploadResponse = await fetch('/api/documents/upload-url', { method: 'POST', headers, body: JSON.stringify({ documentType: 'contest', fileName: form.basesFile.name }) })
+          const upload = await uploadResponse.json()
+          if (!uploadResponse.ok) throw new Error(upload.error || 'No se pudo preparar el archivo')
+          const { error: storageError } = await supabase.storage.from(upload.bucket).uploadToSignedUrl(upload.path, upload.token, form.basesFile)
+          if (storageError) throw storageError
+          const validationResponse = await fetch('/api/documents/validate-pdf', { method: 'POST', headers, body: JSON.stringify({ documentType: 'contest', storagePath: upload.path }) })
+          const validation = await validationResponse.json()
+          if (!validationResponse.ok) { await supabase.storage.from(upload.bucket).remove([upload.path]); throw new Error(validation.reason || validation.error || 'El PDF fue rechazado') }
+          const digest = await crypto.subtle.digest('SHA-256', await form.basesFile.arrayBuffer())
+          const sha256 = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
+          const { data: latest } = await supabase.from('contest_documents').select('version').eq('contest_id', selectedId).eq('document_type', 'BASES').order('version', { ascending: false }).limit(1).maybeSingle()
+          const { error: documentError } = await supabase.from('contest_documents').insert({ contest_id: selectedId, document_type: 'BASES', version: (latest?.version || 0) + 1, storage_path: upload.path, sha256, text_validation_status: validation.status, created_by: auth.user.id })
+          if (documentError) throw documentError
+        } catch (documentError) { return notify(`El borrador se actualizó, pero las bases no se pudieron sustituir: ${documentError.message}`, 'error') }
+      }
+    }
+    setState((current) => ({ ...current, contests: current.contests.map((contest) => contest.id === selectedId ? { ...contest, title: form.title, budget: Number(form.budget), deadline: deadlineMilestone?.dueAt || contest.deadline, bases: form.bases || contest.bases, milestones: milestones.map((milestone) => ({ label: milestone.name, date: formatDate(milestone.dueAt), dueAt: milestone.dueAt, milestoneType: milestone.milestoneType, done: new Date(milestone.dueAt) < new Date() })) } : contest) }))
+    setModal(null)
+    notify('Borrador actualizado correctamente.')
   }
 
   const sendInvitations = async (count) => {
@@ -180,35 +230,36 @@ function App() {
   }
 
   if (auth.loading) return <AuthLoading />
-  if (!isDemoMode && !auth.user) return <AuthScreen error={auth.error} onLogin={async (email, password) => { const { error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw error }} />
+  if (!isDemoMode && !auth.user) return <AuthScreen error={auth.error} onLogin={async (email, password) => { const { data, error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw error; const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }} onRegister={async (fullName, email, password) => { const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } }); if (error) throw error; if (data.session && data.user) { const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }; return data }} />
 
   return (
     <div className="app-shell">
-      <Sidebar section={section} setSection={setSection} unread={unread} />
+      <Sidebar section={section} setSection={setSection} unread={unread} isSupplier={isSupplier} />
       <main className="main-content">
         <Topbar unread={unread} demo={isDemoMode} onNotifications={() => setSection('notifications')} />
         <div className="content-wrap">
           {section === 'dashboard' && <DashboardView state={state} onNew={() => setModal('create')} onOpen={(id) => { setSelectedId(id); setSection('contests'); setDetailTab('resumen') }} />}
-          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onNotify={notify} />}
+          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onNotify={notify} />}
           {section === 'suppliers' && <SuppliersView suppliers={state.suppliers} onInvite={() => { setSection('contests'); setModal('invite') }} />}
           {section === 'notifications' && <NotificationsView notifications={state.notifications} onRead={markRead} />}
-          {section === 'portal' && <SupplierPortal contest={state.contests.find((contest) => contest.status === 'ABIERTO') || state.contests[1]} onNotify={notify} />}
+          {section === 'portal' && isSupplier && <SupplierPortal contest={state.contests.find((contest) => contest.status === 'ABIERTO') || state.contests[1]} onNotify={notify} />}
         </div>
       </main>
       {modal === 'create' && <CreateContestModal onClose={() => setModal(null)} onSubmit={createContest} />}
+      {modal === 'edit' && selectedContest?.status === 'BORRADOR' && <CreateContestModal mode="edit" initialContest={selectedContest} onClose={() => setModal(null)} onSubmit={updateDraftContest} />}
       {modal === 'invite' && <InviteModal contest={selectedContest} onClose={() => setModal(null)} onSubmit={sendInvitations} />}
       {toast && <div className={`toast toast-${toast.tone}`}><Icon name="check" size={16} />{toast.message}</div>}
     </div>
   )
 }
 
-function Sidebar({ section, setSection, unread }) {
+function Sidebar({ section, setSection, unread, isSupplier }) {
   return <aside className="sidebar">
     <div className="brand"><div className="brand-mark">L</div><div><strong>Licitia</strong><span>Procurement OS</span></div></div>
     <div className="workspace-switcher"><div className="workspace-avatar">F</div><div><strong>Fabricum</strong><span>Área de compras</span></div><span className="chevron">⌄</span></div>
     <p className="nav-label">Espacio de trabajo</p>
     <nav className="side-nav">
-      {navItems.map((item) => <button key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'notifications' && unread > 0 && <b className="nav-badge">{unread}</b>}</button>)}
+      {navItems.filter((item) => item.id !== 'portal' || isSupplier).map((item) => <button key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'notifications' && unread > 0 && <b className="nav-badge">{unread}</b>}</button>)}
     </nav>
     <div className="sidebar-spacer" />
     <div className="calendar-connect"><div className="calendar-icon"><Icon name="calendar" size={17} /></div><div><strong>Calendar</strong><span>Conectado</span></div><span className="online-dot" /></div>
@@ -247,15 +298,15 @@ function ActivityList({ items }) {
   return <div className="activity-list">{items.map((item, index) => <div className="activity-item" key={`${item.title}-${index}`}><div className={`activity-icon ${item.tone}`}><Icon name={item.icon} size={15} /></div><div><strong>{item.title}</strong><span>{item.detail}</span></div><span className="activity-time">{index === 0 ? 'Ahora' : 'Ayer'}</span></div>)}</div>
 }
 
-function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onNotify }) {
+function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onNotify }) {
   const [query, setQuery] = useState('')
   const filtered = contests.filter((contest) => contest.title.toLowerCase().includes(query.toLowerCase()) || contest.code.toLowerCase().includes(query.toLowerCase()))
-  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onNotify={onNotify} /></section></div>
+  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onNotify={onNotify} /></section></div>
 }
 
-function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onNotify }) {
+function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onNotify }) {
   const tabs = [['resumen', 'Resumen'], ['propuestas', 'Propuestas'], ['evaluacion', 'Evaluación IA'], ['ranking', 'Ranking económico'], ['auditoria', 'Auditoría']]
-  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <button className="primary-button" onClick={onPublish}>Publicar concurso</button> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} />}{detailTab === 'ranking' && <Ranking contest={contest} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
+  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} />}{detailTab === 'ranking' && <Ranking contest={contest} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
 }
 
 function Overview({ contest, onNotify }) {
@@ -324,8 +375,26 @@ function SupplierPortal({ contest: activeContest, onNotify }) {
 
 function Modal({ title, subtitle, children, onClose, wide = false }) { return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className={`modal ${wide ? 'modal-wide' : ''}`}><div className="modal-header"><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><Icon name="close" size={18} /></button></div>{children}</div></div> }
 
-function CreateContestModal({ onClose, onSubmit }) {
-  const [form, setForm] = useState({ title: '', category: 'Servicios generales', budget: '', bases: '', basesFile: null })
+function toDateTimeLocal(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  return local.toISOString().slice(0, 16)
+}
+
+const defaultMilestones = [
+  { name: 'Publicación', milestoneType: 'PUBLICACION', dueAt: '' },
+  { name: 'Consultas', milestoneType: 'CONSULTAS', dueAt: '' },
+  { name: 'Cierre de propuestas', milestoneType: 'CIERRE', dueAt: '' },
+  { name: 'Adjudicación', milestoneType: 'ADJUDICACION', dueAt: '' },
+]
+
+function CreateContestModal({ onClose, onSubmit, mode = 'create', initialContest }) {
+  const initialMilestones = initialContest?.milestones?.length
+    ? initialContest.milestones.map((milestone) => ({ name: milestone.label, milestoneType: milestone.milestoneType || 'ENTREGABLE', dueAt: toDateTimeLocal(milestone.dueAt) }))
+    : defaultMilestones
+  const [form, setForm] = useState({ title: initialContest?.title || '', category: initialContest?.category || 'Servicios generales', budget: initialContest?.budget || '', bases: initialContest?.bases || '', basesFile: null, milestones: initialMilestones })
   const [fileError, setFileError] = useState(null)
   const chooseFile = (event) => {
     const file = event.target.files?.[0]
@@ -333,7 +402,7 @@ function CreateContestModal({ onClose, onSubmit }) {
     if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) return setFileError('Solo se aceptan archivos PDF.')
     setFileError(null); setForm({ ...form, bases: file.name, basesFile: file })
   }
-  return <Modal title="Nuevo concurso" subtitle="Crea un borrador y completa el expediente antes de publicar." onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSubmit(form) }}><label>Nombre del concurso<input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ej. Servicio de limpieza" /></label><div className="form-row"><label>Categoría<select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}><option>Servicios generales</option><option>Tecnología</option><option>Suministros</option><option>Consultoría</option></select></label><label>Presupuesto referencial<input required type="number" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} placeholder="0" /><small>Moneda: PEN · impuestos incluidos</small></label></div><label>Bases del concurso <span className="label-note">PDF con texto seleccionable</span><div className="upload-box"><Icon name="file" size={20} /><div><strong>{form.bases || 'Selecciona un PDF'}</strong><span>{fileError || (form.basesFile ? 'Listo para validar al crear el borrador.' : 'Los documentos escaneados serán rechazados automáticamente.')}</span></div><input type="file" accept="application/pdf,.pdf" onChange={chooseFile} /></div></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" type="submit">Crear borrador <Icon name="arrow" size={15} /></button></div></form></Modal>
+  return <Modal title={mode === 'edit' ? 'Editar borrador' : 'Nuevo concurso'} subtitle={mode === 'edit' ? 'Mientras el concurso siga en borrador puedes ajustar el presupuesto, cronograma y versión de las bases.' : 'Crea un borrador y completa el expediente antes de publicar.'} onClose={onClose} wide><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSubmit(form) }}><label>Nombre del concurso<input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ej. Servicio de limpieza" /></label><div className="form-row"><label>Categoría<select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}><option>Servicios generales</option><option>Tecnología</option><option>Suministros</option><option>Consultoría</option></select></label><label>Presupuesto referencial<input required type="number" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} placeholder="0" /><small>Moneda: PEN · impuestos incluidos</small></label></div><fieldset className="schedule-fieldset"><legend>Cronograma del concurso</legend><p className="form-help">Define las fechas y horas de cada hito. El cierre determina automáticamente el plazo de recepción.</p>{form.milestones.map((milestone, index) => <div className="schedule-row" key={`${milestone.milestoneType}-${index}`}><input aria-label={`Nombre del hito ${index + 1}`} value={milestone.name} onChange={(event) => setForm({ ...form, milestones: form.milestones.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} /><input aria-label={`Fecha del hito ${index + 1}`} type="datetime-local" value={milestone.dueAt} required={milestone.milestoneType === 'CIERRE'} onChange={(event) => setForm({ ...form, milestones: form.milestones.map((item, itemIndex) => itemIndex === index ? { ...item, dueAt: event.target.value } : item) })} />{form.milestones.length > 1 && <button type="button" className="icon-button" aria-label="Quitar hito" onClick={() => setForm({ ...form, milestones: form.milestones.filter((_, itemIndex) => itemIndex !== index) })}><Icon name="close" size={15} /></button>}</div>)}<button type="button" className="text-button" onClick={() => setForm({ ...form, milestones: [...form.milestones, { name: '', milestoneType: 'ENTREGABLE', dueAt: '' }] })}><Icon name="plus" size={14} />Agregar hito</button></fieldset><label>Bases del concurso <span className="label-note">PDF con texto seleccionable · {mode === 'edit' ? 'puedes cargar una nueva versión' : 'los escaneos serán rechazados'}</span><div className="upload-box"><Icon name="file" size={20} /><div><strong>{form.bases || 'Selecciona un PDF'}</strong><span>{fileError || (form.basesFile ? 'Listo para validar al guardar.' : mode === 'edit' ? 'Conserva la versión actual si no seleccionas otro archivo.' : 'Los documentos escaneados serán rechazados automáticamente.')}</span></div><input type="file" accept="application/pdf,.pdf" onChange={chooseFile} /></div></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" type="submit">{mode === 'edit' ? 'Guardar cambios' : 'Crear borrador'} <Icon name="arrow" size={15} /></button></div></form></Modal>
 }
 
 function LegacyCreateContestModal({ onClose, onSubmit }) {
@@ -350,15 +419,24 @@ function AuthLoading() {
   return <div className="auth-screen"><div className="auth-card"><div className="brand-mark">L</div><h1>Cargando Licitia</h1><p>Comprobando tu sesión segura…</p></div></div>
 }
 
-function AuthScreen({ error, onLogin }) {
-  const [form, setForm] = useState({ email: '', password: '' })
+function AuthScreen({ error, onLogin, onRegister }) {
+  const [mode, setMode] = useState('login')
+  const [form, setForm] = useState({ fullName: '', email: '', password: '' })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(error)
   const submit = async (event) => {
     event.preventDefault(); setBusy(true); setMessage(null)
-    try { await onLogin(form.email, form.password) } catch (loginError) { setMessage(loginError.message || 'No se pudo iniciar sesión') } finally { setBusy(false) }
+    try {
+      if (mode === 'login') await onLogin(form.email, form.password)
+      else {
+        const result = await onRegister(form.fullName, form.email, form.password)
+        if (result?.session) setMessage('Cuenta creada. Iniciando sesión…')
+        else setMessage('Cuenta creada. Revisa tu correo para confirmar la cuenta antes de iniciar sesión.')
+        setMode('login')
+      }
+    } catch (loginError) { setMessage(loginError.message || (mode === 'login' ? 'No se pudo iniciar sesión' : 'No se pudo crear la cuenta')) } finally { setBusy(false) }
   }
-  return <div className="auth-screen"><div className="auth-card"><div className="auth-brand"><div className="brand-mark">L</div><div><strong>Licitia</strong><span>Procurement OS</span></div></div><p className="eyebrow">Área de compras · Fabricum</p><h1>Inicia sesión</h1><p className="page-subtitle">Accede al expediente de concursos y propuestas.</p><form onSubmit={submit} className="auth-form"><label>Correo electrónico<input type="email" required autoComplete="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label><label>Contraseña<input type="password" required autoComplete="current-password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>{message && <p className="auth-error">{message}</p>}<button className="primary-button" disabled={busy}>{busy ? 'Validando…' : 'Entrar'} <Icon name="arrow" size={15} /></button></form></div></div>
+  return <div className="auth-screen"><div className="auth-card"><div className="auth-brand"><div className="brand-mark">L</div><div><strong>Licitia</strong><span>Procurement OS</span></div></div><p className="eyebrow">Área de compras · Fabricum</p><h1>{mode === 'login' ? 'Inicia sesión' : 'Crea tu cuenta'}</h1><p className="page-subtitle">{mode === 'login' ? 'Accede al expediente de concursos y propuestas.' : 'Registra tus datos para solicitar acceso al portal.'}</p><form onSubmit={submit} className="auth-form">{mode === 'register' && <label>Nombre completo<input type="text" required autoComplete="name" value={form.fullName} onChange={(event) => setForm({ ...form, fullName: event.target.value })} /></label>}<label>Correo electrónico<input type="email" required autoComplete="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label><label>Contraseña<input type="password" required minLength={8} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>{message && <p className="auth-error">{message}</p>}<button className="primary-button" disabled={busy}>{busy ? (mode === 'login' ? 'Validando…' : 'Creando…') : (mode === 'login' ? 'Entrar' : 'Crear cuenta')} <Icon name="arrow" size={15} /></button></form><button type="button" className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMessage(null) }}>{mode === 'login' ? '¿No tienes una cuenta? Regístrate' : '¿Ya tienes una cuenta? Inicia sesión'}</button>{mode === 'register' && <p className="auth-note">Las cuentas nuevas quedan como usuarios internos hasta que un gestor las vincule a un proveedor registrado.</p>}</div></div>
 }
 
 export default App
