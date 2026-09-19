@@ -93,9 +93,9 @@ function App() {
       setAuth({ loading: false, user, profile, error: null })
       try {
         const remote = await loadRemoteState()
-        if (active && remote.contests.length) {
+        if (active) {
           setState(remote)
-          setSelectedId(remote.contests[0].id)
+          if (remote.contests.length) setSelectedId(remote.contests[0].id)
         }
       } catch (error) {
         if (active) setToast({ message: `No se pudieron cargar los datos de Supabase: ${error.message}`, tone: 'error' })
