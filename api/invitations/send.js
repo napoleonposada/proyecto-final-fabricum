@@ -14,20 +14,19 @@ export default async function handler(req, res) {
     const { data: targets, error: targetError } = await supabase.from('contest_suppliers').select('id, supplier_id, suppliers(legal_name, supplier_contacts(id, email, is_primary))').eq('contest_id', contestId).limit(count)
     if (targetError) throw targetError
     const expiresAt = contest.proposal_deadline || new Date(Date.now() + 14 * 864e5).toISOString()
-    const invitations = (targets || []).map((target) => {
+    const payloads = (targets || []).map((target) => {
       const supplier = Array.isArray(target.suppliers) ? target.suppliers[0] : target.suppliers
       const contact = supplier?.supplier_contacts?.find((item) => item.is_primary) || supplier?.supplier_contacts?.[0]
       const token = crypto.randomBytes(32).toString('base64url')
-      return { contest_supplier_id: target.id, contact_id: contact?.id || null, token_hash: crypto.createHash('sha256').update(token).digest('hex'), expires_at: expiresAt, delivery_status: provider === 'mock' ? 'ENVIO_SIMULADO' : 'PENDIENTE' }
+      return { contact, token, invitation: { contest_supplier_id: target.id, contact_id: contact?.id || null, token_hash: crypto.createHash('sha256').update(token).digest('hex'), expires_at: expiresAt, delivery_status: provider === 'mock' ? 'ENVIO_SIMULADO' : 'PENDIENTE' } }
     })
+    const invitations = payloads.map((payload) => payload.invitation)
     if (invitations.length) {
       const { error: invitationError } = await supabase.from('invitations').insert(invitations)
       if (invitationError) throw invitationError
-      const outbox = invitations.map((invitation, index) => {
-        const target = targets[index]
-        const supplier = Array.isArray(target.suppliers) ? target.suppliers[0] : target.suppliers
-        const contact = supplier?.supplier_contacts?.find((item) => item.is_primary) || supplier?.supplier_contacts?.[0]
-        return { email: contact?.email || 'sin-contacto@example.invalid', subject: `Invitación ${contest.code}`, body: `Accede al portal de proveedores para presentar tu propuesta en ${contest.title}.`, status: provider === 'mock' ? 'ENVIADO' : 'PENDIENTE', sent_at: provider === 'mock' ? new Date().toISOString() : null }
+      const baseUrl = process.env.APP_URL || process.env.VITE_APP_URL || 'http://localhost:5173'
+      const outbox = payloads.map((payload) => {
+        return { email: payload.contact?.email || 'sin-contacto@example.invalid', subject: `Invitación ${contest.code}`, body: `Accede al portal de proveedores para presentar tu propuesta en ${contest.title}: ${baseUrl}/portal?token=${payload.token}`, status: provider === 'mock' ? 'ENVIADO' : 'PENDIENTE', sent_at: provider === 'mock' ? new Date().toISOString() : null }
       })
       const { error: outboxError } = await supabase.from('notification_outbox').insert(outbox)
       if (outboxError) throw outboxError
