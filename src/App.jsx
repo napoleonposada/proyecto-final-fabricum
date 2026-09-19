@@ -126,6 +126,24 @@ function App() {
     if (!isDemoMode) {
       const { data, error } = await supabase.from('contests').insert({ code: `CMP-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`, title: form.title, status: 'BORRADOR', reference_budget: Number(form.budget), currency_code: 'PEN', tax_included: true, created_by: auth.user.id }).select('id, code, title, status, reference_budget, currency_code, proposal_deadline').single()
       if (error) return notify(error.message, 'error')
+      if (form.basesFile) {
+        try {
+          const { data: sessionData } = await supabase.auth.getSession()
+          const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }
+          const uploadResponse = await fetch('/api/documents/upload-url', { method: 'POST', headers, body: JSON.stringify({ documentType: 'contest', fileName: form.basesFile.name }) })
+          const upload = await uploadResponse.json()
+          if (!uploadResponse.ok) throw new Error(upload.error || 'No se pudo preparar el archivo')
+          const { error: storageError } = await supabase.storage.from(upload.bucket).uploadToSignedUrl(upload.path, upload.token, form.basesFile)
+          if (storageError) throw storageError
+          const validationResponse = await fetch('/api/documents/validate-pdf', { method: 'POST', headers, body: JSON.stringify({ documentType: 'contest', storagePath: upload.path }) })
+          const validation = await validationResponse.json()
+          if (!validationResponse.ok) { await supabase.storage.from(upload.bucket).remove([upload.path]); throw new Error(validation.reason || validation.error || 'El PDF fue rechazado') }
+          const digest = await crypto.subtle.digest('SHA-256', await form.basesFile.arrayBuffer())
+          const sha256 = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
+          const { error: documentError } = await supabase.from('contest_documents').insert({ contest_id: data.id, document_type: 'BASES', version: 1, storage_path: upload.path, sha256, text_validation_status: validation.status, created_by: auth.user.id })
+          if (documentError) throw documentError
+        } catch (documentError) { notify(`Borrador creado, pero las bases no se pudieron validar: ${documentError.message}`, 'error') }
+      }
       setState((current) => ({ ...current, contests: [{ id: data.id, code: data.code, title: data.title, status: data.status, statusLabel: 'Borrador', category: form.category, budget: Number(data.reference_budget), currency: data.currency_code, deadline: data.proposal_deadline || new Date(Date.now() + 14 * 864e5).toISOString(), invited: 0, submitted: 0, progress: 0, manager: auth.user.full_name || 'Gestor autenticado', bases: form.bases || 'Pendiente de carga', requirements: 0, aiReady: 0, milestones: [], offers: [] }, ...current.contests] }))
       setModal(null); setSection('contests'); return notify('Borrador persistido en Supabase.')
     }
@@ -307,6 +325,18 @@ function SupplierPortal({ contest: activeContest, onNotify }) {
 function Modal({ title, subtitle, children, onClose, wide = false }) { return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className={`modal ${wide ? 'modal-wide' : ''}`}><div className="modal-header"><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><Icon name="close" size={18} /></button></div>{children}</div></div> }
 
 function CreateContestModal({ onClose, onSubmit }) {
+  const [form, setForm] = useState({ title: '', category: 'Servicios generales', budget: '', bases: '', basesFile: null })
+  const [fileError, setFileError] = useState(null)
+  const chooseFile = (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) return setFileError('Solo se aceptan archivos PDF.')
+    setFileError(null); setForm({ ...form, bases: file.name, basesFile: file })
+  }
+  return <Modal title="Nuevo concurso" subtitle="Crea un borrador y completa el expediente antes de publicar." onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSubmit(form) }}><label>Nombre del concurso<input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ej. Servicio de limpieza" /></label><div className="form-row"><label>Categoría<select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}><option>Servicios generales</option><option>Tecnología</option><option>Suministros</option><option>Consultoría</option></select></label><label>Presupuesto referencial<input required type="number" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} placeholder="0" /><small>Moneda: PEN · impuestos incluidos</small></label></div><label>Bases del concurso <span className="label-note">PDF con texto seleccionable</span><div className="upload-box"><Icon name="file" size={20} /><div><strong>{form.bases || 'Selecciona un PDF'}</strong><span>{fileError || (form.basesFile ? 'Listo para validar al crear el borrador.' : 'Los documentos escaneados serán rechazados automáticamente.')}</span></div><input type="file" accept="application/pdf,.pdf" onChange={chooseFile} /></div></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" type="submit">Crear borrador <Icon name="arrow" size={15} /></button></div></form></Modal>
+}
+
+function LegacyCreateContestModal({ onClose, onSubmit }) {
   const [form, setForm] = useState({ title: '', category: 'Servicios generales', budget: '', bases: '' })
   return <Modal title="Nuevo concurso" subtitle="Crea un borrador y completa el expediente antes de publicar." onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSubmit(form) }}><label>Nombre del concurso<input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ej. Servicio de limpieza" /></label><div className="form-row"><label>Categoría<select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}><option>Servicios generales</option><option>Tecnología</option><option>Suministros</option><option>Consultoría</option></select></label><label>Presupuesto referencial<input required type="number" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} placeholder="0" /><small>Moneda: PEN · impuestos incluidos</small></label></div><label>Bases del concurso <span className="label-note">PDF con texto seleccionable</span><div className="upload-box"><Icon name="file" size={20} /><div><strong>Arrastra el PDF aquí</strong><span>Los documentos escaneados serán rechazados.</span></div><button type="button" className="secondary-button">Seleccionar archivo</button></div></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" type="submit">Crear borrador <Icon name="arrow" size={15} /></button></div></form></Modal>
 }
