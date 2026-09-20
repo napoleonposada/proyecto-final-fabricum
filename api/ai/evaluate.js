@@ -1,4 +1,5 @@
 import { createUserClient, createAdminClient, json } from '../_lib/supabaseServer.js'
+import { createPdfParser } from '../_lib/pdf.js'
 
 const model = process.env.OLLAMA_MODEL || 'gpt-oss:120b'
 
@@ -21,12 +22,9 @@ async function requireStaff(req) {
 }
 
 async function extractPdfText(admin, bucket, storagePath) {
-  // Cargar pdf-parse bajo demanda evita que Vercel falle al inicializar la
-  // función cuando todavía no se está procesando ningún PDF.
-  const { PDFParse } = await import('pdf-parse')
   const { data: file, error } = await admin.storage.from(bucket).download(storagePath)
   if (error) throw error
-  const parser = new PDFParse({ data: new Uint8Array(await file.arrayBuffer()) })
+  const parser = await createPdfParser(new Uint8Array(await file.arrayBuffer()))
   try {
     const result = await parser.getText()
     return String(result?.text || '').trim()
