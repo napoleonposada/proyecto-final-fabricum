@@ -29,6 +29,7 @@ function Icon({ name, size = 18 }) {
     check: <><path d="m5 12 4 4L19 6" /></>,
     clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
     external: <><path d="M14 3h7v7M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></>,
+    logout: <><path d="M10 17l5-5-5-5" /><path d="M15 12H3" /><path d="M21 19V5a2 2 0 0 0-2-2h-5" /></>,
   }
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
@@ -118,6 +119,16 @@ function App() {
   const notify = (message, tone = 'success') => {
     setToast({ message, tone })
     window.setTimeout(() => setToast(null), 3200)
+  }
+
+  const signOut = async () => {
+    if (!isDemoMode) {
+      const { error } = await supabase.auth.signOut({ scope: 'local' })
+      if (error) return notify(error.message, 'error')
+    }
+    setModal(null)
+    setSection('dashboard')
+    setAuth({ loading: false, user: null, profile: null, error: null })
   }
 
   const publishContest = async () => {
@@ -230,11 +241,11 @@ function App() {
   }
 
   if (auth.loading) return <AuthLoading />
-  if (!isDemoMode && !auth.user) return <AuthScreen error={auth.error} onLogin={async (email, password) => { const { data, error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw error; const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }} onRegister={async (fullName, email, password) => { const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } }); if (error) throw error; if (data.session && data.user) { const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }; return data }} />
+  if (!auth.user) return <AuthScreen error={auth.error} onLogin={async (email, password) => { if (isDemoMode) { setAuth({ loading: false, user: { id: 'demo-manager', full_name: 'María Salazar' }, profile: { id: 'demo-manager', full_name: 'María Salazar', role: 'GESTOR', supplier_id: null }, error: null }); return }; const { data, error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw error; const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }} onRegister={async (fullName, email, password) => { if (isDemoMode) throw new Error('El registro no está disponible en modo demostración.'); const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } }); if (error) throw error; if (data.session && data.user) { const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }; return data }} />
 
   return (
     <div className="app-shell">
-      <Sidebar section={section} setSection={setSection} unread={unread} isSupplier={isSupplier} />
+      <Sidebar section={section} setSection={setSection} unread={unread} isSupplier={isSupplier} profile={auth.profile} onSignOut={signOut} />
       <main className="main-content">
         <Topbar unread={unread} demo={isDemoMode} onNotifications={() => setSection('notifications')} />
         <div className="content-wrap">
@@ -253,7 +264,7 @@ function App() {
   )
 }
 
-function Sidebar({ section, setSection, unread, isSupplier }) {
+function Sidebar({ section, setSection, unread, isSupplier, profile, onSignOut }) {
   return <aside className="sidebar">
     <div className="brand"><div className="brand-mark">L</div><div><strong>Licitia</strong><span>Procurement OS</span></div></div>
     <div className="workspace-switcher"><div className="workspace-avatar">F</div><div><strong>Fabricum</strong><span>Área de compras</span></div><span className="chevron">⌄</span></div>
@@ -264,7 +275,7 @@ function Sidebar({ section, setSection, unread, isSupplier }) {
     <div className="sidebar-spacer" />
     <div className="calendar-connect"><div className="calendar-icon"><Icon name="calendar" size={17} /></div><div><strong>Calendar</strong><span>Conectado</span></div><span className="online-dot" /></div>
     <button className="nav-item muted"><Icon name="settings" /><span>Configuración</span></button>
-    <div className="user-card"><div className="user-avatar">MS</div><div><strong>María Salazar</strong><span>Gestora</span></div><span className="user-more">•••</span></div>
+    <div className="user-card"><div className="user-avatar">{(profile?.full_name || 'Usuario').split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div><div><strong>{profile?.full_name || 'Usuario'}</strong><span>{profile?.role === 'PROVEEDOR' ? 'Proveedor' : 'Gestor'}</span></div><button type="button" className="signout-button" onClick={onSignOut} aria-label="Cerrar sesión" title="Cerrar sesión"><Icon name="logout" size={16} /></button></div>
   </aside>
 }
 

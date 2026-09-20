@@ -90,3 +90,5 @@ h3 { font: 700 14px Manrope, sans-serif; margin-bottom: 4px; }
 .schedule-row { display: grid; grid-template-columns: 1.1fr 1fr auto; gap: 8px; align-items: center; }
 .schedule-row input { min-width: 0; }
 .schedule-row .icon-button { width: 32px; height: 32px; }
+.signout-button { margin-left: auto; width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #9199aa; display: grid; place-items: center; cursor: pointer; transition: background .15s ease, color .15s ease; }
+.signout-button:hover { background: #f1efff; color: #5f50c8; }
