@@ -45,7 +45,7 @@ function formatDate(value) {
 
 async function loadRemoteState(profile) {
   const isSupplierProfile = profile?.role === 'PROVEEDOR' && Boolean(profile?.supplier_id)
-  const [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult] = await Promise.all([
+  const [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult, aiRunsResult, reviewsResult, contractsResult] = await Promise.all([
     supabase.from('contests').select('id, code, title, status, reference_budget, currency_code, proposal_deadline'),
     supabase.from('suppliers').select('id, legal_name, tags, active, supplier_contacts(full_name, email, is_primary)'),
     supabase.from('contest_suppliers').select('contest_id, supplier_id'),
@@ -54,8 +54,11 @@ async function loadRemoteState(profile) {
     supabase.from('contest_documents').select('id, contest_id, storage_path, version, text_validation_status').order('version', { ascending: false }),
     supabase.from('contest_milestones').select('contest_id, name, due_at, milestone_type').order('due_at'),
     supabase.from('proposal_documents').select('id, proposal_id, document_type, storage_path, text_validation_status').order('created_at', { ascending: false }),
+    supabase.from('ai_evaluation_runs').select('id, proposal_id, result, processing_status, rationale, created_at, completed_at').order('created_at', { ascending: false }),
+    supabase.from('human_reviews').select('id, run_id, reviewer_id, decision, reason, created_at').order('created_at', { ascending: false }),
+    supabase.from('contracts').select('id, contest_id, proposal_id, contract_number, status, starts_at, ends_at, created_at').order('created_at', { ascending: false }),
   ])
-  const firstError = [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult].find((item) => item.error)
+  const firstError = [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult, aiRunsResult, reviewsResult, contractsResult].find((item) => item.error)
   if (firstError) throw firstError.error
   const suppliers = (suppliersResult.data || []).map((supplier) => ({ id: supplier.id, name: supplier.legal_name, email: supplier.supplier_contacts?.find((contact) => contact.is_primary)?.email || supplier.supplier_contacts?.[0]?.email || '—', segment: supplier.tags?.[0] || 'General', active: supplier.active }))
   const suppliersById = Object.fromEntries(suppliers.map((supplier) => [supplier.id, supplier]))
@@ -72,12 +75,24 @@ async function loadRemoteState(profile) {
   for (const milestone of milestonesResult.data || []) (milestonesByContest[milestone.contest_id] ||= []).push({ label: milestone.name, date: formatDate(milestone.due_at), dueAt: milestone.due_at, milestoneType: milestone.milestone_type, done: new Date(milestone.due_at) < new Date() })
   const proposalDocumentsByProposal = {}
   for (const document of proposalDocumentsResult.data || []) (proposalDocumentsByProposal[document.proposal_id] ||= []).push(document)
+  const latestAiRunByProposal = {}
+  for (const run of aiRunsResult.data || []) if (!latestAiRunByProposal[run.proposal_id]) latestAiRunByProposal[run.proposal_id] = run
+  const latestReviewByRun = {}
+  for (const review of reviewsResult.data || []) if (!latestReviewByRun[review.run_id]) latestReviewByRun[review.run_id] = review
+  const contractsByContest = {}
+  for (const contract of contractsResult.data || []) if (!contractsByContest[contract.contest_id]) contractsByContest[contract.contest_id] = contract
   const proposalsByContest = {}
-  for (const proposal of proposalsResult.data || []) (proposalsByContest[proposal.contest_id] ||= []).push({ ...proposal, supplier: suppliersById[proposal.supplier_id]?.name || 'Proveedor', amount: Number(proposal.total_amount), result: proposal.status === 'NO_APTA' ? 'NO_APTA' : proposal.status === 'APTA' ? 'APTA' : 'PENDIENTE', reason: 'Revisión pendiente de la evaluación IA.', review: 'Pendiente', technicalDocument: proposalDocumentsByProposal[proposal.id]?.find((document) => document.document_type === 'TECNICA') || null, economicDocument: proposalDocumentsByProposal[proposal.id]?.find((document) => document.document_type === 'ECONOMICA') || null })
+  for (const proposal of proposalsResult.data || []) {
+    const aiRun = latestAiRunByProposal[proposal.id]
+    const humanReview = aiRun ? latestReviewByRun[aiRun.id] : null
+    const confirmedResult = humanReview?.decision || (proposal.status === 'NO_APTA' || proposal.status === 'APTA' ? proposal.status : 'PENDIENTE')
+    if (!proposalsByContest[proposal.contest_id]) proposalsByContest[proposal.contest_id] = []
+    proposalsByContest[proposal.contest_id].push({ ...proposal, supplier: suppliersById[proposal.supplier_id]?.name || 'Proveedor', amount: Number(proposal.total_amount), result: confirmedResult, aiResult: aiRun?.result || null, aiRunId: aiRun?.id || null, reason: humanReview?.reason || aiRun?.rationale || 'Evaluación pendiente de la IA.', review: humanReview ? 'Confirmada' : aiRun ? 'Pendiente de confirmación' : 'Pendiente', technicalDocument: proposalDocumentsByProposal[proposal.id]?.find((document) => document.document_type === 'TECNICA') || null, economicDocument: proposalDocumentsByProposal[proposal.id]?.find((document) => document.document_type === 'ECONOMICA') || null })
+  }
   const contests = (contestsResult.data || []).map((contest) => {
     const offers = proposalsByContest[contest.id] || []
     const invited = invitedByContest[contest.id] || 0
-    return { id: contest.id, code: contest.code, title: contest.title, status: contest.status, statusLabel: contest.status, category: 'Proceso de contratación', budget: Number(contest.reference_budget), currency: contest.currency_code, deadline: contest.proposal_deadline || new Date().toISOString(), invited, invitedSupplierIds: invitedSupplierIdsByContest[contest.id] || [], submitted: offers.length, progress: invited ? Math.min(100, Math.round(offers.length / invited * 100)) : 0, manager: 'Gestor autenticado', bases: documentsByContest[contest.id]?.fileName || 'Bases pendientes de carga', baseDocument: documentsByContest[contest.id] || null, requirements: 0, aiReady: offers.filter((offer) => offer.result !== 'PENDIENTE').length, milestones: milestonesByContest[contest.id] || [], offers }
+    return { id: contest.id, code: contest.code, title: contest.title, status: contest.status, statusLabel: contest.status, category: 'Proceso de contratación', budget: Number(contest.reference_budget), currency: contest.currency_code, deadline: contest.proposal_deadline || new Date().toISOString(), invited, invitedSupplierIds: invitedSupplierIdsByContest[contest.id] || [], submitted: offers.length, progress: invited ? Math.min(100, Math.round(offers.length / invited * 100)) : 0, manager: 'Gestor autenticado', bases: documentsByContest[contest.id]?.fileName || 'Bases pendientes de carga', baseDocument: documentsByContest[contest.id] || null, requirements: 0, aiReady: offers.filter((offer) => offer.aiResult).length, contract: contractsByContest[contest.id] || null, milestones: milestonesByContest[contest.id] || [], offers }
   })
   const notifications = (notificationsResult.data || []).map((notification) => ({ id: notification.id, type: notification.severity?.toLowerCase() === 'warning' ? 'warning' : notification.severity?.toLowerCase() === 'critical' ? 'warning' : 'info', title: notification.title, body: notification.body, time: formatDate(notification.created_at), unread: !notification.read_at }))
   return { contests: isSupplierProfile ? contests.filter((contest) => contest.status === 'ABIERTO') : contests, suppliers, notifications, activity: [] }
@@ -90,6 +105,8 @@ function App() {
   const [selectedId, setSelectedId] = useState('c-014')
   const [detailTab, setDetailTab] = useState('resumen')
   const [modal, setModal] = useState(null)
+  const [reviewTarget, setReviewTarget] = useState(null)
+  const [awardTarget, setAwardTarget] = useState(null)
   const [toast, setToast] = useState(null)
 
   useEffect(() => {
@@ -272,6 +289,73 @@ function App() {
     notify(sentCount ? `Se procesaron ${sentCount} invitaciones${alreadyInvitedCount ? `; ${alreadyInvitedCount} ya estaban registradas.` : '.'}` : 'Los proveedores seleccionados ya estaban invitados.')
   }
 
+  const callEvaluationApi = async (body) => {
+    const { data: sessionData } = await supabase.auth.getSession()
+    const response = await fetch('/api/ai/evaluate', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }, body: JSON.stringify(body) })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.error || 'No se pudo procesar la evaluación')
+    return payload
+  }
+
+  const downloadProposalDocument = async (document) => {
+    if (!document?.id) return notify('El documento todavía no está disponible.', 'error')
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const response = await fetch(`/api/documents/download-url?documentType=proposal&documentId=${encodeURIComponent(document.id)}`, { headers: { Authorization: `Bearer ${sessionData.session?.access_token || ''}` } })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'No se pudo generar la descarga')
+      window.open(payload.url, '_blank', 'noopener,noreferrer')
+    } catch (error) { notify(error.message, 'error') }
+  }
+
+  const runAiEvaluation = async (offer) => {
+    if (!offer || (!offer.id && !isDemoMode)) return notify('La propuesta no tiene un identificador válido.', 'error')
+    const offerKey = offer.id || offer.supplier
+    if (isDemoMode) {
+      setState((current) => ({ ...current, contests: current.contests.map((contest) => contest.id === selectedId ? { ...contest, aiReady: contest.aiReady + 1, offers: contest.offers.map((item) => (item.id || item.supplier) === offerKey ? { ...item, aiResult: item.result === 'NO_APTA' ? 'NO_APTA' : 'APTA', reason: item.reason || 'Preevaluación demo completada.', review: 'Pendiente de confirmación' } : item) } : contest) }))
+      return notify('Preevaluación IA completada en modo demostración.')
+    }
+    try {
+      await callEvaluationApi({ proposalId: offer.id })
+      const remote = await loadRemoteState(auth.profile)
+      setState(remote)
+      notify('Preevaluación IA completada. Revisa el razonamiento antes de confirmar.')
+    } catch (error) { notify(error.message, 'error') }
+  }
+
+  const submitHumanReview = async ({ proposalId, runId, decision, reason }) => {
+    if (isDemoMode) {
+      setState((current) => ({ ...current, contests: current.contests.map((contest) => contest.id === selectedId ? { ...contest, offers: contest.offers.map((item) => (item.id || item.supplier) === proposalId ? { ...item, result: decision, review: 'Confirmada', reason } : item) } : contest) }))
+      setReviewTarget(null)
+      notify(`Evaluación confirmada como ${decision === 'APTA' ? 'APTA' : 'NO APTA'}.`)
+      return
+    }
+    try {
+      await callEvaluationApi({ action: 'review', proposalId, runId, decision, reason })
+      const remote = await loadRemoteState(auth.profile)
+      setState(remote)
+      setReviewTarget(null)
+      notify(`Evaluación confirmada como ${decision === 'APTA' ? 'APTA' : 'NO APTA'}.`)
+    } catch (error) { notify(error.message, 'error') }
+  }
+
+  const submitAward = async ({ contractNumber, startsAt, endsAt }) => {
+    if (!awardTarget) return
+    if (isDemoMode) {
+      setState((current) => ({ ...current, contests: current.contests.map((contest) => contest.id === selectedId ? { ...contest, status: 'ADJUDICADO', statusLabel: 'Adjudicado', contract: { contract_number: contractNumber || `CTR-${contest.code}`, status: 'BORRADOR', proposal_id: awardTarget.id, starts_at: startsAt, ends_at: endsAt } } : contest) }))
+      setAwardTarget(null)
+      notify('Adjudicación registrada en modo demostración.')
+      return
+    }
+    try {
+      await callEvaluationApi({ action: 'award', contestId: selectedId, proposalId: awardTarget.id, contractNumber, startsAt: startsAt || null, endsAt: endsAt || null })
+      const remote = await loadRemoteState(auth.profile)
+      setState(remote)
+      setAwardTarget(null)
+      notify('Adjudicación registrada y contrato creado como borrador.')
+    } catch (error) { notify(error.message, 'error') }
+  }
+
   const markRead = async (id) => {
     if (!isDemoMode) await supabase.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', id)
     setState((current) => ({ ...current, notifications: current.notifications.map((n) => n.id === id ? { ...n, unread: false } : n) }))
@@ -287,15 +371,17 @@ function App() {
         <Topbar unread={unread} demo={isDemoMode} supplier={isSupplier} onNotifications={() => setSection('notifications')} />
         <div className="content-wrap">
           {section === 'dashboard' && <DashboardView state={state} onNew={() => setModal('create')} onOpen={(id) => { setSelectedId(id); setSection('contests'); setDetailTab('resumen') }} />}
-          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onDeleteDraft={deleteDraftContest} onNotify={notify} />}
+          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onDeleteDraft={deleteDraftContest} onNotify={notify} onEvaluate={runAiEvaluation} onReview={(offer) => setReviewTarget(offer)} onAward={(offer) => setAwardTarget(offer)} onDownloadProposal={downloadProposalDocument} />}
           {section === 'suppliers' && <SuppliersView suppliers={state.suppliers} onInvite={() => { setSection('contests'); setModal('invite') }} />}
           {section === 'notifications' && <NotificationsView notifications={state.notifications} onRead={markRead} />}
-          {section === 'portal' && isSupplier && <SupplierPortal contests={state.contests} supplier={auth.profile} user={auth.user} onNotify={notify} onStateRefresh={async () => { const remote = await loadRemoteState(auth.profile); setState(remote) }} />}
+          {section === 'portal' && isSupplier && <SupplierPortal contests={state.contests} supplier={{ ...auth.profile, legal_name: (state.suppliers || []).find((item) => item.id === auth.profile?.supplier_id)?.name || null }} user={auth.user} onNotify={notify} onStateRefresh={async () => { const remote = await loadRemoteState(auth.profile); setState(remote) }} />}
         </div>
       </main>
       {modal === 'create' && <CreateContestModal onClose={() => setModal(null)} onSubmit={createContest} />}
       {modal === 'edit' && selectedContest?.status === 'BORRADOR' && <CreateContestModal mode="edit" initialContest={selectedContest} onClose={() => setModal(null)} onSubmit={updateDraftContest} />}
       {modal === 'invite' && <InviteModal contest={selectedContest} suppliers={state.suppliers} onClose={() => setModal(null)} onSubmit={sendInvitations} />}
+      {reviewTarget && <ReviewModal offer={reviewTarget} onClose={() => setReviewTarget(null)} onSubmit={submitHumanReview} />}
+      {awardTarget && <AwardModal contest={selectedContest} offer={awardTarget} onClose={() => setAwardTarget(null)} onSubmit={submitAward} />}
       {toast && <div className={`toast toast-${toast.tone}`}><Icon name="check" size={16} />{toast.message}</div>}
     </div>
   )
@@ -345,16 +431,16 @@ function ActivityList({ items }) {
   return <div className="activity-list">{items.map((item, index) => <div className="activity-item" key={`${item.title}-${index}`}><div className={`activity-icon ${item.tone}`}><Icon name={item.icon} size={15} /></div><div><strong>{item.title}</strong><span>{item.detail}</span></div><span className="activity-time">{index === 0 ? 'Ahora' : 'Ayer'}</span></div>)}</div>
 }
 
-function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onDeleteDraft, onNotify }) {
+function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onDeleteDraft, onNotify, onEvaluate, onReview, onAward, onDownloadProposal }) {
   const [query, setQuery] = useState('')
   const filtered = contests.filter((contest) => contest.title.toLowerCase().includes(query.toLowerCase()) || contest.code.toLowerCase().includes(query.toLowerCase()))
-  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onDeleteDraft={onDeleteDraft} onNotify={onNotify} /></section></div>
+  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onDeleteDraft={onDeleteDraft} onNotify={onNotify} onEvaluate={onEvaluate} onReview={onReview} onAward={onAward} onDownloadProposal={onDownloadProposal} /></section></div>
 }
 
-function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onDeleteDraft, onNotify }) {
+function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onDeleteDraft, onNotify, onEvaluate, onReview, onAward, onDownloadProposal }) {
   const tabs = [['resumen', 'Resumen'], ['propuestas', 'Propuestas'], ['evaluacion', 'Evaluación IA'], ['ranking', 'Ranking económico'], ['auditoria', 'Auditoría']]
   if (!contest) return <div className="detail-body"><div className="sealed-empty"><div className="sealed-art soft"><Icon name="briefcase" size={24} /></div><h3>Selecciona un concurso</h3><p>Crea un nuevo concurso o elige uno de la lista para revisar su expediente.</p></div></div>
-  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="danger-button" onClick={onDeleteDraft}>Depurar</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} />}{detailTab === 'ranking' && <Ranking contest={contest} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
+  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="danger-button" onClick={onDeleteDraft}>Depurar</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} onDownloadProposal={onDownloadProposal} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} onEvaluate={onEvaluate} onReview={onReview} onDownloadProposal={onDownloadProposal} />}{detailTab === 'ranking' && <Ranking contest={contest} onAward={onAward} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
 }
 
 function Overview({ contest, onNotify }) {
@@ -362,21 +448,22 @@ function Overview({ contest, onNotify }) {
   return <div className="detail-body"><div className="overview-cards"><div className="overview-stat"><span>Presupuesto referencial</span><strong>{formatCurrency(contest.budget, contest.currency)}</strong><small>Impuestos incluidos · {contest.currency}</small></div><div className="overview-stat"><span>Recepción de propuestas</span><strong>{remaining > 0 ? `En ${remaining} días` : 'Cerrada'}</strong><small>{remaining > 0 ? '23 sep 2026, 18:00' : '17 sep 2026, 18:00'}</small></div><div className="overview-stat"><span>Participación</span><strong>{contest.submitted} <em>/ {contest.invited}</em></strong><small>{contest.invited ? Math.round(contest.submitted / contest.invited * 100) : 0}% de proveedores</small></div></div><div className="overview-grid"><section className="inner-panel"><div className="inner-heading"><div><h3>Documentos del concurso</h3><p>Versiones aprobadas y disponibles.</p></div><button className="icon-text-button"><Icon name="download" size={15} />Descargar</button></div><div className="document-row"><div className="document-icon"><Icon name="file" size={18} /></div><div><strong>{contest.bases}</strong><span>PDF · Versión 2 · Texto validado</span></div><span className="doc-status"><Icon name="check" size={14} />Válido</span></div></section><section className="inner-panel"><div className="inner-heading"><div><h3>Cronograma</h3><p>Hitos principales del proceso.</p></div><button className="icon-text-button" onClick={() => onNotify('Las fechas se sincronizarán con tu Calendar.') }><Icon name="calendar" size={15} />Calendar</button></div><div className="milestone-list">{contest.milestones.map((milestone) => <div className={`milestone-row ${milestone.done ? 'done' : ''}`} key={milestone.label}><span className="milestone-check">{milestone.done && <Icon name="check" size={12} />}</span><div><strong>{milestone.label}</strong><span>{milestone.date}</span></div></div>)}</div></section></div><section className="attention-callout"><div className="callout-icon"><Icon name="clock" size={17} /></div><div><strong>{contest.status === 'EN_EVALUACION' ? `${contest.aiReady} evaluaciones listas para revisión` : 'Próximo hito: cierre de propuestas'}</strong><span>{contest.status === 'EN_EVALUACION' ? 'Revisa el resultado de la IA y confirma la admisibilidad de cada propuesta.' : 'Recuerda que las propuestas se sellan automáticamente al llegar la fecha límite.'}</span></div><button className="text-button" onClick={() => onNotify('Se abrió el centro de notificaciones.')}>Ver notificaciones <Icon name="arrow" size={14} /></button></section></div>
 }
 
-function Proposals({ contest }) {
-  const closed = contest.status === 'EN_EVALUACION' || contest.status === 'ADJUDICADO' || contest.status === 'CERRADO'
-  return <div className="detail-body"><div className="section-title-row"><div><h2>Propuestas recibidas</h2><p>{closed ? 'La recepción está cerrada. Los documentos están disponibles para revisión.' : 'Las propuestas se mantienen ocultas hasta el cierre del concurso.'}</p></div><span className="sealed-label"><Icon name="lock" size={14} />{closed ? 'Recepción cerrada' : 'Recepción sellada'}</span></div>{!closed && <div className="sealed-empty"><div className="sealed-art"><Icon name="lock" size={24} /></div><h3>Las propuestas están selladas</h3><p>Podrás consultar los documentos e importes cuando finalice el plazo de presentación.</p><div className="sealed-counter"><span>Propuestas recibidas</span><strong>{contest.submitted}</strong></div></div>}{closed && <div className="proposal-table"><div className="table-head"><span>Proveedor</span><span>Envío</span><span>Documentos</span><span>Estado</span><span /></div>{(contest.offers.length ? contest.offers : [{ supplier: 'Propuestas registradas', amount: 0, result: 'APTA', reason: '', review: 'Pendiente' }]).map((offer) => <div className="table-row proposal-row" key={offer.supplier}><div className="contest-name"><div className="supplier-avatar">{offer.supplier.slice(0, 1)}</div><div><strong>{offer.supplier}</strong><span>Enviada el 17 sep 2026 · 17:{Math.floor(Math.random() * 50 + 10)}</span></div></div><span className="doc-checks"><Icon name="check" size={13} />Técnica <Icon name="check" size={13} />Económica</span><span className="review-status"><span className="status-dot" />{offer.review}</span><button className="ghost-action">Abrir <Icon name="arrow" size={14} /></button></div>)}</div>}</div>
+function Proposals({ contest, onDownloadProposal }) {
+  const closed = contest.status === 'EN_EVALUACION' || contest.status === 'ADJUDICADO' || contest.status === 'CERRADO' || (contest.deadline && new Date(contest.deadline).getTime() <= Date.now())
+  return <div className="detail-body"><div className="section-title-row"><div><h2>Propuestas recibidas</h2><p>{closed ? 'La recepción está cerrada. Los documentos están disponibles para revisión.' : 'Las propuestas se mantienen ocultas hasta el cierre del concurso.'}</p></div><span className="sealed-label"><Icon name="lock" size={14} />{closed ? 'Recepción cerrada' : 'Recepción sellada'}</span></div>{!closed && <div className="sealed-empty"><div className="sealed-art"><Icon name="lock" size={24} /></div><h3>Las propuestas están selladas</h3><p>Podrás consultar los documentos e importes cuando finalice el plazo de presentación.</p><div className="sealed-counter"><span>Propuestas recibidas</span><strong>{contest.submitted}</strong></div></div>}{closed && <div className="proposal-table"><div className="table-head"><span>Proveedor</span><span>Envío</span><span>Documentos</span><span>Estado</span><span /></div>{(contest.offers.length ? contest.offers : [{ supplier: 'Propuestas registradas', amount: 0, result: 'PENDIENTE', reason: '', review: 'Pendiente' }]).map((offer) => <div className="table-row proposal-row" key={offer.id || offer.supplier}><div className="contest-name"><div className="supplier-avatar">{offer.supplier.slice(0, 1)}</div><div><strong>{offer.supplier}</strong><span>{offer.submitted_at ? `${formatDate(offer.submitted_at)} · ${new Date(offer.submitted_at).toLocaleTimeString('es-PE')}` : 'Enviada'}</span></div></div><span className="doc-checks"><Icon name="check" size={13} />Técnica <Icon name="check" size={13} />Económica</span><span className="review-status"><span className="status-dot" />{offer.review}</span><span className="proposal-amount">{formatCurrency(offer.amount, contest.currency)}</span><span className="proposal-doc-actions">{offer.technicalDocument && <button className="ghost-action" onClick={() => onDownloadProposal(offer.technicalDocument)}>Técnica</button>}{offer.economicDocument && <button className="ghost-action" onClick={() => onDownloadProposal(offer.economicDocument)}>Económica</button>}</span></div>)}</div>}</div>
 }
 
-function Evaluation({ contest, onNotify }) {
-  if (contest.status === 'ABIERTO' || contest.status === 'BORRADOR') return <div className="detail-body"><div className="sealed-empty evaluation-locked"><div className="sealed-art soft"><Icon name="lock" size={24} /></div><h3>Evaluación disponible al cierre</h3><p>El agente de IA comenzará después del vencimiento del plazo, cuando las propuestas sean abiertas.</p><span className="muted-note"><Icon name="clock" size={14} />Cierre previsto: 23 sep 2026, 18:00</span></div></div>
-  return <div className="detail-body"><div className="section-title-row"><div><h2>Evaluación previa</h2><p>Resultado de Ollama Cloud pendiente de confirmación humana.</p></div><button className="secondary-button" onClick={() => onNotify('Las evaluaciones pendientes se procesarán en segundo plano.')}><Icon name="external" size={15} />Ver guía</button></div><div className="ai-summary"><div className="ai-summary-icon">✦</div><div><strong>Agente de evaluación completado</strong><span>Modelo: gpt-oss:120b · Prompt v1.0 · 19 sep 2026, 09:42</span></div><div className="ai-summary-stat"><strong>{contest.aiReady}</strong><span>listas para revisar</span></div></div><div className="evaluation-list">{contest.offers.map((offer) => <div className="evaluation-row" key={offer.supplier}><div className="supplier-avatar">{offer.supplier.slice(0, 1)}</div><div className="evaluation-supplier"><strong>{offer.supplier}</strong><span>{offer.reason}</span></div><span className={`ai-result ${offer.result === 'APTA' ? 'apta' : 'no-apta'}`}><span />{offer.result === 'APTA' ? 'APTA' : 'NO APTA'}</span><span className="review-chip">{offer.review === 'Confirmada' ? <><Icon name="check" size={13} />Confirmada</> : 'Pendiente'}</span><button className="review-button" onClick={() => onNotify(`Se abrió la propuesta de ${offer.supplier}.`)}>Revisar <Icon name="arrow" size={14} /></button></div>)}</div><div className="ai-footnote"><span>✦</span><p>La clasificación es una preevaluación. Descarga la propuesta, verifica la evidencia y confirma el resultado para continuar con el ranking económico.</p></div></div>
+function Evaluation({ contest, onNotify, onEvaluate, onReview, onDownloadProposal }) {
+  const closed = contest.status === 'EN_EVALUACION' || contest.status === 'ADJUDICADO' || contest.status === 'CERRADO' || (contest.deadline && new Date(contest.deadline).getTime() <= Date.now())
+  if (!closed) return <div className="detail-body"><div className="sealed-empty evaluation-locked"><div className="sealed-art soft"><Icon name="lock" size={24} /></div><h3>Evaluación disponible al cierre</h3><p>El agente de IA comenzará después del vencimiento del plazo, cuando las propuestas sean abiertas.</p><span className="muted-note"><Icon name="clock" size={14} />Cierre previsto: {formatDate(contest.deadline)}</span></div></div>
+  return <div className="detail-body"><div className="section-title-row"><div><h2>Evaluación previa</h2><p>Ollama Cloud clasifica cada propuesta y el gestor confirma el resultado.</p></div><button className="secondary-button" onClick={() => onNotify('Descarga los documentos y confirma manualmente cada resultado IA.')}><Icon name="external" size={15} />Guía de revisión</button></div><div className="ai-summary"><div className="ai-summary-icon">✦</div><div><strong>Evaluación asistida por IA</strong><span>Modelo: gpt-oss:120b · Cada resultado queda registrado para auditoría.</span></div><div className="ai-summary-stat"><strong>{contest.aiReady}</strong><span>evaluadas</span></div></div><div className="evaluation-list">{contest.offers.map((offer) => <div className="evaluation-row" key={offer.id || offer.supplier}><div className="supplier-avatar">{offer.supplier.slice(0, 1)}</div><div className="evaluation-supplier"><strong>{offer.supplier}</strong><span>{offer.reason}</span>{offer.amount > contest.budget && <small className="evaluation-warning">Excede el presupuesto referencial.</small>}</div>{offer.aiResult ? <span className={`ai-result ${offer.aiResult === 'APTA' ? 'apta' : 'no-apta'}`}><span />IA: {offer.aiResult === 'APTA' ? 'APTA' : 'NO APTA'}</span> : <span className="ai-result pending"><span />Pendiente</span>}<span className="review-chip">{offer.review === 'Confirmada' ? <><Icon name="check" size={13} />Confirmada</> : offer.aiResult ? 'Pendiente de confirmación' : 'Sin evaluar'}</span><div className="evaluation-actions">{offer.technicalDocument && <button className="ghost-action" onClick={() => onDownloadProposal(offer.technicalDocument)}>Técnica</button>}{offer.economicDocument && <button className="ghost-action" onClick={() => onDownloadProposal(offer.economicDocument)}>Económica</button>}{!offer.aiResult && <button className="review-button" onClick={() => onEvaluate(offer)}>Evaluar con IA</button>}{offer.aiResult && offer.review !== 'Confirmada' && <button className="review-button" onClick={() => onReview(offer)}>Confirmar</button>}{offer.aiResult && <button className="ghost-action" onClick={() => onNotify(`Propuesta de ${offer.supplier}: ${offer.reason}`)}>Razonamiento</button>}</div></div>)}</div><div className="ai-footnote"><span>✦</span><p>La clasificación es una preevaluación. El gestor debe descargar la propuesta, verificar la evidencia y confirmar APTA o NO APTA antes de incluirla en el ranking.</p></div></div>
 }
 
-function Ranking({ contest }) {
+function Ranking({ contest, onAward }) {
   const admitted = contest.offers.filter((offer) => offer.result === 'APTA').sort((a, b) => a.amount - b.amount)
   const amounts = admitted.map((offer) => offer.amount)
   const average = amounts.length ? amounts.reduce((total, amount) => total + amount, 0) / amounts.length : 0
-  return <div className="detail-body"><div className="section-title-row"><div><h2>Ranking económico</h2><p>Solo incluye propuestas aptas y dentro del presupuesto.</p></div><span className="sealed-label success"><Icon name="check" size={14} />Precios con impuestos</span></div><div className="economic-cards"><div><span>Mínimo admitido</span><strong>{formatCurrency(amounts[0] || 0)}</strong></div><div><span>Promedio admitido</span><strong>{formatCurrency(average)}</strong></div><div><span>Máximo admitido</span><strong>{formatCurrency(amounts[amounts.length - 1] || 0)}</strong></div><div><span>Presupuesto</span><strong>{formatCurrency(contest.budget)}</strong></div></div><div className="ranking-table"><div className="table-head"><span>#</span><span>Proveedor</span><span>Monto total</span><span>Distancia al presupuesto</span><span>Estado</span></div>{admitted.map((offer, index) => <div className="ranking-row" key={offer.supplier}><strong className="rank-number">{String(index + 1).padStart(2, '0')}</strong><div className="contest-name"><div className="supplier-avatar">{offer.supplier.slice(0, 1)}</div><strong>{offer.supplier}</strong></div><strong>{formatCurrency(offer.amount)}</strong><span className="budget-distance">-{formatCurrency(contest.budget - offer.amount)}</span><span className="ai-result apta"><span />Admitida</span></div>)}{!admitted.length && <div className="empty-table">Aún no hay propuestas admitidas para mostrar.</div>}</div></div>
+  return <div className="detail-body"><div className="section-title-row"><div><h2>Ranking económico</h2><p>Solo incluye propuestas APTA confirmadas y dentro del presupuesto.</p></div><span className="sealed-label success"><Icon name="check" size={14} />Precios con impuestos</span></div><div className="economic-cards"><div><span>Mínimo admitido</span><strong>{formatCurrency(amounts[0] || 0, contest.currency)}</strong></div><div><span>Promedio admitido</span><strong>{formatCurrency(average, contest.currency)}</strong></div><div><span>Máximo admitido</span><strong>{formatCurrency(amounts[amounts.length - 1] || 0, contest.currency)}</strong></div><div><span>Presupuesto</span><strong>{formatCurrency(contest.budget, contest.currency)}</strong></div></div><div className="ranking-table"><div className="table-head"><span>#</span><span>Proveedor</span><span>Monto total</span><span>Distancia al presupuesto</span><span>Estado</span><span /></div>{admitted.map((offer, index) => <div className="ranking-row" key={offer.id || offer.supplier}><strong className="rank-number">{String(index + 1).padStart(2, '0')}</strong><div className="contest-name"><div className="supplier-avatar">{offer.supplier.slice(0, 1)}</div><strong>{offer.supplier}</strong></div><strong>{formatCurrency(offer.amount, contest.currency)}</strong><span className="budget-distance">-{formatCurrency(contest.budget - offer.amount, contest.currency)}</span><span className="ai-result apta"><span />Admitida</span>{contest.status !== 'ADJUDICADO' && <button className="primary-button compact-button" onClick={() => onAward(offer)}>Adjudicar</button>}</div>)}{!admitted.length && <div className="empty-table">Aún no hay propuestas APTA confirmadas para mostrar.</div>}</div>{contest.contract && <div className="award-summary"><Icon name="check" size={16} /><span>Adjudicación registrada: <strong>{contest.contract.contract_number}</strong> · Contrato {contest.contract.status.toLowerCase()}</span></div>}</div>
 }
 
 function AuditLog({ contest }) {
@@ -411,7 +498,7 @@ function SupplierPortal({ contests = [], supplier, user, onNotify, onStateRefres
   const availableContests = contests.filter((item) => item.status === 'ABIERTO')
   const contest = availableContests.find((item) => item.id === selectedContestId) || null
   const proposal = contest?.offers?.find((offer) => offer.supplier_id === supplier?.supplier_id) || contest?.offers?.[0] || null
-  const company = user?.user_metadata?.company || 'Proveedor registrado'
+  const company = supplier?.legal_name || user?.user_metadata?.company || 'Proveedor registrado'
   const contactEmail = user?.email || '—'
   const technicalDocument = proposal?.technicalDocument
   const economicDocument = proposal?.economicDocument
@@ -564,6 +651,19 @@ function InviteModal({ contest, suppliers = [], onClose, onSubmit }) {
   const selectableIds = availableSuppliers.filter((supplier) => !invitedIds.has(supplier.id)).map((supplier) => supplier.id)
   const allSelected = selectableIds.length > 0 && selectableIds.every((supplierId) => selectedIds.includes(supplierId))
   return <Modal title="Invitar proveedores" subtitle={`${contest.code} · selecciona los contactos para este concurso`} onClose={onClose} wide><div className="invite-summary"><div className="invite-icon"><Icon name="send" size={22} /></div><div><strong>Envío seguro y segmentado</strong><span>Cada proveedor recibirá un enlace de un solo uso con fecha de vencimiento hasta el cierre del concurso.</span></div></div><div className="segment-selector"><span>Proveedores registrados</span><button type="button" className="segment-choice" onClick={() => setSelectedIds(allSelected ? [] : selectableIds)}><span className="segment-dot" />{allSelected ? 'Quitar selección' : 'Seleccionar todos los disponibles'}<span>{selectedIds.length} seleccionados</span></button></div><div className="supplier-selection">{availableSuppliers.map((supplier) => { const alreadyInvited = invitedIds.has(supplier.id); return <label className={`supplier-option ${alreadyInvited ? 'already-invited' : ''}`} key={supplier.id}><input type="checkbox" checked={alreadyInvited || selectedIds.includes(supplier.id)} disabled={alreadyInvited} onChange={() => toggleSupplier(supplier.id)} /><span className="supplier-option-main"><strong>{supplier.name}</strong><small>{supplier.email} · {supplier.segment || 'General'}</small></span>{alreadyInvited && <em>Ya invitado</em>}</label> })}</div><div className="invite-count"><span>Contactos nuevos a invitar</span><strong>{selectedIds.filter((id) => !invitedIds.has(id)).length}</strong></div><div className="simulation-note"><span>i</span><p>El correo está configurado en modo mock para esta demostración. Se registrará el envío, el token seguro y el enlace del portal sin enviar mensajes externos.</p></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="button" className="primary-button" disabled={!selectedIds.length} onClick={() => onSubmit(selectedIds.filter((id) => !invitedIds.has(id)))}>Enviar invitaciones <Icon name="send" size={15} /></button></div></Modal>
+}
+
+function ReviewModal({ offer, onClose, onSubmit }) {
+  const [decision, setDecision] = useState(offer.aiResult || 'APTA')
+  const [reason, setReason] = useState(offer.reason || '')
+  return <Modal title="Confirmar evaluación" subtitle={`${offer.supplier} · revisión humana obligatoria`} onClose={onClose}><div className="review-preview"><span className={`ai-result ${offer.aiResult === 'APTA' ? 'apta' : 'no-apta'}`}><span />Resultado IA: {offer.aiResult === 'APTA' ? 'APTA' : 'NO APTA'}</span><p>{offer.reason}</p></div><div className="modal-form"><label>Decisión del gestor<select value={decision} onChange={(event) => setDecision(event.target.value)}><option value="APTA">APTA · Admitir</option><option value="NO_APTA">NO APTA · Rechazar</option></select></label><label>Justificación<input required value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Indica por qué confirmas el resultado." /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="button" className="primary-button" disabled={!reason.trim()} onClick={() => onSubmit({ proposalId: offer.id || offer.supplier, runId: offer.aiRunId, decision, reason })}>Confirmar evaluación <Icon name="check" size={15} /></button></div></Modal>
+}
+
+function AwardModal({ contest, offer, onClose, onSubmit }) {
+  const [contractNumber, setContractNumber] = useState(`CTR-${contest.code}`)
+  const [startsAt, setStartsAt] = useState('')
+  const [endsAt, setEndsAt] = useState('')
+  return <Modal title="Adjudicar concurso" subtitle={`${contest.code} · ${offer.supplier}`} onClose={onClose}><div className="award-preview"><span>Oferta seleccionada</span><strong>{formatCurrency(offer.amount, contest.currency)}</strong><small>Propuesta confirmada como APTA</small></div><div className="modal-form"><label>Número de contrato<input value={contractNumber} onChange={(event) => setContractNumber(event.target.value)} placeholder={`CTR-${contest.code}`} /></label><div className="form-row"><label>Inicio del contrato<input type="date" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></label><label>Fin del contrato<input type="date" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} /></label></div></div><div className="simulation-note"><span>i</span><p>La adjudicación cambiará el concurso a “Adjudicado” y creará el contrato en estado borrador para completar sus entregables.</p></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="button" className="primary-button" onClick={() => onSubmit({ contractNumber, startsAt, endsAt })}>Registrar adjudicación <Icon name="check" size={15} /></button></div></Modal>
 }
 
 function AuthLoading() {
