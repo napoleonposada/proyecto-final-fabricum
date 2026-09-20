@@ -12,6 +12,7 @@
     "@napi-rs/canvas": "0.1.80",
     "@supabase/supabase-js": "2.116.0",
     "pdf-parse": "2.4.5",
+    "pdfjs-dist": "5.4.296",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
