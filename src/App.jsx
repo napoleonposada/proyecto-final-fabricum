@@ -43,6 +43,17 @@ function formatDate(value) {
   return value ? new Intl.DateTimeFormat('es-PE', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(value)) : '—'
 }
 
+async function getCalendarStatus() {
+  if (isDemoMode) return { connected: false, demo: true }
+  const { data: sessionData } = await supabase.auth.getSession()
+  const token = sessionData.session?.access_token
+  if (!token) return { connected: false }
+  const response = await fetch('/api/calendar/status', { headers: { Authorization: `Bearer ${token}` } })
+  const payload = await response.json()
+  if (!response.ok) throw new Error(payload.error || 'No se pudo consultar Calendar')
+  return payload
+}
+
 async function loadRemoteState(profile) {
   const isSupplierProfile = profile?.role === 'PROVEEDOR' && Boolean(profile?.supplier_id)
   const [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult, aiRunsResult, reviewsResult, contractsResult] = await Promise.all([
@@ -108,6 +119,7 @@ function App() {
   const [reviewTarget, setReviewTarget] = useState(null)
   const [awardTarget, setAwardTarget] = useState(null)
   const [toast, setToast] = useState(null)
+  const [calendarStatus, setCalendarStatus] = useState({ loading: true, connected: false })
 
   useEffect(() => {
     if (isDemoMode) return undefined
@@ -119,6 +131,7 @@ function App() {
       try { profile = await getCurrentProfile(user.id) } catch (profileError) { return setAuth({ loading: false, user: null, profile: null, error: `No se pudo cargar tu perfil: ${profileError.message}` }) }
       setAuth({ loading: false, user, profile, error: null })
       setSection(profile?.role === 'PROVEEDOR' ? 'portal' : 'dashboard')
+      getCalendarStatus().then((status) => active && setCalendarStatus({ loading: false, ...status })).catch(() => active && setCalendarStatus({ loading: false, connected: false }))
       try {
         const remote = await loadRemoteState(profile)
         if (active) {
@@ -149,6 +162,34 @@ function App() {
     window.setTimeout(() => setToast(null), 3200)
   }
 
+  const connectCalendar = async () => {
+    if (isDemoMode) return notify('Conecta Calendar cuando la aplicación no esté en modo demostración.', 'error')
+    setCalendarStatus((current) => ({ ...current, loading: true }))
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const token = sessionData.session?.access_token
+      const response = await fetch('/api/calendar/authorize', { method: 'POST', headers: { Authorization: `Bearer ${token || ''}` } })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'No se pudo iniciar la conexión con Google')
+      window.location.assign(payload.authorizationUrl)
+    } catch (error) {
+      setCalendarStatus((current) => ({ ...current, loading: false }))
+      notify(error.message, 'error')
+    }
+  }
+
+  const syncCalendarContest = async (contestId) => {
+    if (isDemoMode) return notify('La sincronización de Calendar estará disponible al desactivar el modo demostración.', 'error')
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const response = await fetch('/api/calendar/events', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }, body: JSON.stringify({ contestId }) })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'No se pudo sincronizar el concurso')
+      setCalendarStatus((current) => ({ ...current, loading: false, connected: true }))
+      notify(`${payload.count || 0} fechas sincronizadas con tu Google Calendar.`)
+    } catch (error) { notify(error.message, 'error') }
+  }
+
   const signOut = async () => {
     if (!isDemoMode) {
       const { error } = await supabase.auth.signOut({ scope: 'local' })
@@ -156,6 +197,7 @@ function App() {
     }
     setModal(null)
     setSection('dashboard')
+    setCalendarStatus({ loading: false, connected: false })
     setAuth({ loading: false, user: null, profile: null, error: null })
   }
 
@@ -366,12 +408,12 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar section={section} setSection={setSection} unread={unread} isSupplier={isSupplier} profile={auth.profile} onSignOut={signOut} />
+      <Sidebar section={section} setSection={setSection} unread={unread} isSupplier={isSupplier} profile={auth.profile} calendarStatus={calendarStatus} onConnectCalendar={connectCalendar} onSignOut={signOut} />
       <main className="main-content">
         <Topbar unread={unread} demo={isDemoMode} supplier={isSupplier} onNotifications={() => setSection('notifications')} />
         <div className="content-wrap">
-          {section === 'dashboard' && <DashboardView state={state} onNew={() => setModal('create')} onOpen={(id) => { setSelectedId(id); setSection('contests'); setDetailTab('resumen') }} />}
-          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onDeleteDraft={deleteDraftContest} onNotify={notify} onEvaluate={runAiEvaluation} onReview={(offer) => setReviewTarget(offer)} onAward={(offer) => setAwardTarget(offer)} onDownloadProposal={downloadProposalDocument} />}
+          {section === 'dashboard' && <DashboardView state={state} onNew={() => setModal('create')} onOpen={(id) => { setSelectedId(id); setSection('contests'); setDetailTab('resumen') }} onCalendar={connectCalendar} />}
+          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onDeleteDraft={deleteDraftContest} onNotify={notify} onEvaluate={runAiEvaluation} onReview={(offer) => setReviewTarget(offer)} onAward={(offer) => setAwardTarget(offer)} onDownloadProposal={downloadProposalDocument} onSyncCalendar={syncCalendarContest} />}
           {section === 'suppliers' && <SuppliersView suppliers={state.suppliers} onInvite={() => { setSection('contests'); setModal('invite') }} />}
           {section === 'notifications' && <NotificationsView notifications={state.notifications} onRead={markRead} />}
           {section === 'portal' && isSupplier && <SupplierPortal contests={state.contests} supplier={{ ...auth.profile, legal_name: (state.suppliers || []).find((item) => item.id === auth.profile?.supplier_id)?.name || null }} user={auth.user} onNotify={notify} onStateRefresh={async () => { const remote = await loadRemoteState(auth.profile); setState(remote) }} />}
@@ -387,7 +429,7 @@ function App() {
   )
 }
 
-function Sidebar({ section, setSection, unread, isSupplier, profile, onSignOut }) {
+function Sidebar({ section, setSection, unread, isSupplier, profile, calendarStatus, onConnectCalendar, onSignOut }) {
   return <aside className="sidebar">
     <div className="brand"><div className="brand-mark">L</div><div><strong>Licitia</strong><span>Procurement OS</span></div></div>
     <div className="workspace-switcher"><div className="workspace-avatar">F</div><div><strong>Fabricum</strong><span>Área de compras</span></div><span className="chevron">⌄</span></div>
@@ -396,7 +438,7 @@ function Sidebar({ section, setSection, unread, isSupplier, profile, onSignOut }
       {(isSupplier ? navItems.filter((item) => item.id === 'portal') : navItems.filter((item) => item.id !== 'portal')).map((item) => <button key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'notifications' && unread > 0 && <b className="nav-badge">{unread}</b>}</button>)}
     </nav>
     <div className="sidebar-spacer" />
-    {!isSupplier && <><div className="calendar-connect"><div className="calendar-icon"><Icon name="calendar" size={17} /></div><div><strong>Calendar</strong><span>Conectado</span></div><span className="online-dot" /></div><button className="nav-item muted"><Icon name="settings" /><span>Configuración</span></button></>}
+    {!isSupplier && <><button type="button" className={`calendar-connect ${calendarStatus.connected ? 'connected' : ''}`} onClick={onConnectCalendar} disabled={calendarStatus.loading}><div className="calendar-icon"><Icon name="calendar" size={17} /></div><div><strong>Calendar</strong><span>{calendarStatus.loading ? 'Comprobando…' : calendarStatus.connected ? 'Conectado' : 'Conectar Google'}</span></div><span className="online-dot" /></button><button className="nav-item muted"><Icon name="settings" /><span>Configuración</span></button></>}
     <div className="user-card"><div className="user-avatar">{(profile?.full_name || 'Usuario').split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div><div><strong>{profile?.full_name || 'Usuario'}</strong><span>{profile?.role === 'PROVEEDOR' ? 'Proveedor' : 'Gestor'}</span></div><button type="button" className="signout-button" onClick={onSignOut} aria-label="Cerrar sesión" title="Cerrar sesión"><Icon name="logout" size={16} /></button></div>
   </aside>
 }
@@ -405,7 +447,7 @@ function Topbar({ unread, demo, supplier, onNotifications }) {
   return <header className="topbar"><div className="breadcrumb"><span>Área de compras</span><span className="slash">/</span><strong>{supplier ? 'Portal proveedor' : 'Resumen'}</strong></div><div className="topbar-actions">{demo && <span className="demo-badge"><span className="demo-dot" />Modo demostración</span>}{!supplier && <button className="icon-button" onClick={onNotifications} aria-label="Notificaciones"><Icon name="bell" size={19} />{unread > 0 && <span className="notification-dot" />}</button>}<button className="help-button">?</button></div></header>
 }
 
-function DashboardView({ state, onNew, onOpen }) {
+function DashboardView({ state, onNew, onOpen, onCalendar }) {
   const openCount = state.contests.filter((c) => c.status === 'ABIERTO').length
   return <>
     <div className="page-heading"><div><p className="eyebrow">Sábado, 19 de septiembre de 2026</p><h1>Buenos días, María <span className="wave">✦</span></h1><p className="page-subtitle">Este es el estado de tus procesos de contratación.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo concurso</button></div>
@@ -419,7 +461,7 @@ function DashboardView({ state, onNew, onOpen }) {
       <section className="panel panel-wide"><div className="panel-header"><div><h2>Concursos recientes</h2><p>Un vistazo a tus procesos en curso.</p></div><button className="text-button" onClick={() => onOpen(state.contests[0].id)}>Ver todos <Icon name="arrow" size={15} /></button></div><div className="contest-table"><div className="table-head"><span>Concurso</span><span>Estado</span><span>Propuestas</span><span>Avance</span><span /></div>{state.contests.slice(0, 3).map((contest) => <button className="table-row" key={contest.id} onClick={() => onOpen(contest.id)}><div className="contest-name"><div className="contest-icon"><Icon name="briefcase" size={16} /></div><div><strong>{contest.title}</strong><span>{contest.code} · {contest.category}</span></div></div><StatusPill status={contest.status} /><span className="proposals-count"><strong>{contest.submitted}</strong> / {contest.invited}</span><div className="mini-progress"><div><span style={{ width: `${contest.progress}%` }} /></div><small>{contest.progress}%</small></div><Icon name="arrow" size={16} /></button>)}</div></section>
       <section className="panel"><div className="panel-header"><div><h2>Actividad reciente</h2><p>Últimos movimientos registrados.</p></div></div><ActivityList items={state.activity} /></section>
     </div>
-    <section className="panel timeline-panel"><div className="panel-header"><div><h2>Próximos hitos</h2><p>Fechas importantes de tus concursos.</p></div><button className="text-button">Abrir Calendar <Icon name="external" size={14} /></button></div><div className="timeline"><div className="timeline-line" />{state.contests.slice(0, 2).map((contest) => <div className="timeline-item" key={contest.id}><div className="timeline-date"><strong>{contest.milestones.find((m) => !m.done)?.date || '—'}</strong><span>{contest.code}</span></div><div className="timeline-marker" /><div><strong>{contest.milestones.find((m) => !m.done)?.label || 'Sin pendientes'}</strong><span>{contest.title}</span></div><span className="timeline-days">En {contest.id === 'c-014' ? '5 días' : '4 días'}</span></div>)}</div></section>
+    <section className="panel timeline-panel"><div className="panel-header"><div><h2>Próximos hitos</h2><p>Fechas importantes de tus concursos.</p></div><button className="text-button" onClick={onCalendar}>Conectar Calendar <Icon name="external" size={14} /></button></div><div className="timeline"><div className="timeline-line" />{state.contests.slice(0, 2).map((contest) => <div className="timeline-item" key={contest.id}><div className="timeline-date"><strong>{contest.milestones.find((m) => !m.done)?.date || '—'}</strong><span>{contest.code}</span></div><div className="timeline-marker" /><div><strong>{contest.milestones.find((m) => !m.done)?.label || 'Sin pendientes'}</strong><span>{contest.title}</span></div><span className="timeline-days">En {contest.id === 'c-014' ? '5 días' : '4 días'}</span></div>)}</div></section>
   </>
 }
 
@@ -431,21 +473,21 @@ function ActivityList({ items }) {
   return <div className="activity-list">{items.map((item, index) => <div className="activity-item" key={`${item.title}-${index}`}><div className={`activity-icon ${item.tone}`}><Icon name={item.icon} size={15} /></div><div><strong>{item.title}</strong><span>{item.detail}</span></div><span className="activity-time">{index === 0 ? 'Ahora' : 'Ayer'}</span></div>)}</div>
 }
 
-function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onDeleteDraft, onNotify, onEvaluate, onReview, onAward, onDownloadProposal }) {
+function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onDeleteDraft, onNotify, onEvaluate, onReview, onAward, onDownloadProposal, onSyncCalendar }) {
   const [query, setQuery] = useState('')
   const filtered = contests.filter((contest) => contest.title.toLowerCase().includes(query.toLowerCase()) || contest.code.toLowerCase().includes(query.toLowerCase()))
-  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onDeleteDraft={onDeleteDraft} onNotify={onNotify} onEvaluate={onEvaluate} onReview={onReview} onAward={onAward} onDownloadProposal={onDownloadProposal} /></section></div>
+  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onDeleteDraft={onDeleteDraft} onNotify={onNotify} onEvaluate={onEvaluate} onReview={onReview} onAward={onAward} onDownloadProposal={onDownloadProposal} onSyncCalendar={onSyncCalendar} /></section></div>
 }
 
-function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onDeleteDraft, onNotify, onEvaluate, onReview, onAward, onDownloadProposal }) {
+function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onDeleteDraft, onNotify, onEvaluate, onReview, onAward, onDownloadProposal, onSyncCalendar }) {
   const tabs = [['resumen', 'Resumen'], ['propuestas', 'Propuestas'], ['evaluacion', 'Evaluación IA'], ['ranking', 'Ranking económico'], ['auditoria', 'Auditoría']]
   if (!contest) return <div className="detail-body"><div className="sealed-empty"><div className="sealed-art soft"><Icon name="briefcase" size={24} /></div><h3>Selecciona un concurso</h3><p>Crea un nuevo concurso o elige uno de la lista para revisar su expediente.</p></div></div>
-  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="danger-button" onClick={onDeleteDraft}>Depurar</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} onDownloadProposal={onDownloadProposal} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} onEvaluate={onEvaluate} onReview={onReview} onDownloadProposal={onDownloadProposal} />}{detailTab === 'ranking' && <Ranking contest={contest} onAward={onAward} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
+  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="danger-button" onClick={onDeleteDraft}>Depurar</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} onSyncCalendar={onSyncCalendar} />}{detailTab === 'propuestas' && <Proposals contest={contest} onDownloadProposal={onDownloadProposal} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} onEvaluate={onEvaluate} onReview={onReview} onDownloadProposal={onDownloadProposal} />}{detailTab === 'ranking' && <Ranking contest={contest} onAward={onAward} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
 }
 
-function Overview({ contest, onNotify }) {
+function Overview({ contest, onNotify, onSyncCalendar }) {
   const remaining = Math.ceil((new Date(contest.deadline).getTime() - Date.now()) / 864e5)
-  return <div className="detail-body"><div className="overview-cards"><div className="overview-stat"><span>Presupuesto referencial</span><strong>{formatCurrency(contest.budget, contest.currency)}</strong><small>Impuestos incluidos · {contest.currency}</small></div><div className="overview-stat"><span>Recepción de propuestas</span><strong>{remaining > 0 ? `En ${remaining} días` : 'Cerrada'}</strong><small>{remaining > 0 ? '23 sep 2026, 18:00' : '17 sep 2026, 18:00'}</small></div><div className="overview-stat"><span>Participación</span><strong>{contest.submitted} <em>/ {contest.invited}</em></strong><small>{contest.invited ? Math.round(contest.submitted / contest.invited * 100) : 0}% de proveedores</small></div></div><div className="overview-grid"><section className="inner-panel"><div className="inner-heading"><div><h3>Documentos del concurso</h3><p>Versiones aprobadas y disponibles.</p></div><button className="icon-text-button"><Icon name="download" size={15} />Descargar</button></div><div className="document-row"><div className="document-icon"><Icon name="file" size={18} /></div><div><strong>{contest.bases}</strong><span>PDF · Versión 2 · Texto validado</span></div><span className="doc-status"><Icon name="check" size={14} />Válido</span></div></section><section className="inner-panel"><div className="inner-heading"><div><h3>Cronograma</h3><p>Hitos principales del proceso.</p></div><button className="icon-text-button" onClick={() => onNotify('Las fechas se sincronizarán con tu Calendar.') }><Icon name="calendar" size={15} />Calendar</button></div><div className="milestone-list">{contest.milestones.map((milestone) => <div className={`milestone-row ${milestone.done ? 'done' : ''}`} key={milestone.label}><span className="milestone-check">{milestone.done && <Icon name="check" size={12} />}</span><div><strong>{milestone.label}</strong><span>{milestone.date}</span></div></div>)}</div></section></div><section className="attention-callout"><div className="callout-icon"><Icon name="clock" size={17} /></div><div><strong>{contest.status === 'EN_EVALUACION' ? `${contest.aiReady} evaluaciones listas para revisión` : 'Próximo hito: cierre de propuestas'}</strong><span>{contest.status === 'EN_EVALUACION' ? 'Revisa el resultado de la IA y confirma la admisibilidad de cada propuesta.' : 'Recuerda que las propuestas se sellan automáticamente al llegar la fecha límite.'}</span></div><button className="text-button" onClick={() => onNotify('Se abrió el centro de notificaciones.')}>Ver notificaciones <Icon name="arrow" size={14} /></button></section></div>
+  return <div className="detail-body"><div className="overview-cards"><div className="overview-stat"><span>Presupuesto referencial</span><strong>{formatCurrency(contest.budget, contest.currency)}</strong><small>Impuestos incluidos · {contest.currency}</small></div><div className="overview-stat"><span>Recepción de propuestas</span><strong>{remaining > 0 ? `En ${remaining} días` : 'Cerrada'}</strong><small>{remaining > 0 ? '23 sep 2026, 18:00' : '17 sep 2026, 18:00'}</small></div><div className="overview-stat"><span>Participación</span><strong>{contest.submitted} <em>/ {contest.invited}</em></strong><small>{contest.invited ? Math.round(contest.submitted / contest.invited * 100) : 0}% de proveedores</small></div></div><div className="overview-grid"><section className="inner-panel"><div className="inner-heading"><div><h3>Documentos del concurso</h3><p>Versiones aprobadas y disponibles.</p></div><button className="icon-text-button"><Icon name="download" size={15} />Descargar</button></div><div className="document-row"><div className="document-icon"><Icon name="file" size={18} /></div><div><strong>{contest.bases}</strong><span>PDF · Versión 2 · Texto validado</span></div><span className="doc-status"><Icon name="check" size={14} />Válido</span></div></section><section className="inner-panel"><div className="inner-heading"><div><h3>Cronograma</h3><p>Hitos principales del proceso.</p></div><button className="icon-text-button" onClick={() => onSyncCalendar(contest.id)}><Icon name="calendar" size={15} />Sincronizar Calendar</button></div><div className="milestone-list">{contest.milestones.map((milestone) => <div className={`milestone-row ${milestone.done ? 'done' : ''}`} key={milestone.label}><span className="milestone-check">{milestone.done && <Icon name="check" size={12} />}</span><div><strong>{milestone.label}</strong><span>{milestone.date}</span></div></div>)}</div></section></div><section className="attention-callout"><div className="callout-icon"><Icon name="clock" size={17} /></div><div><strong>{contest.status === 'EN_EVALUACION' ? `${contest.aiReady} evaluaciones listas para revisión` : 'Próximo hito: cierre de propuestas'}</strong><span>{contest.status === 'EN_EVALUACION' ? 'Revisa el resultado de la IA y confirma la admisibilidad de cada propuesta.' : 'Recuerda que las propuestas se sellan automáticamente al llegar la fecha límite.'}</span></div><button className="text-button" onClick={() => onNotify('Se abrió el centro de notificaciones.')}>Ver notificaciones <Icon name="arrow" size={14} /></button></section></div>
 }
 
 function Proposals({ contest, onDownloadProposal }) {

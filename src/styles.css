@@ -25,6 +25,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .nav-badge { margin-left: auto; background: #e9e7ff; color: #5f4fd0; border-radius: 99px; padding: 2px 7px; font-size: 10px; }
 .sidebar-spacer { flex: 1; min-height: 80px; }
 .calendar-connect { margin: 7px 3px 10px; padding: 11px; border-radius: 11px; background: #f5fbf8; display: flex; align-items: center; gap: 9px; }
+.calendar-connect { width: calc(100% - 6px); border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.calendar-connect:disabled { cursor: wait; opacity: .72; }
 .calendar-icon { color: var(--green); }
 .calendar-connect strong { display: block; font-size: 12px; }
 .online-dot { margin-left: auto; width: 7px; height: 7px; background: #41b57e; border-radius: 50%; box-shadow: 0 0 0 3px #d9f4e7; }
