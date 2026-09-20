@@ -92,3 +92,16 @@ h3 { font: 700 14px Manrope, sans-serif; margin-bottom: 4px; }
 .schedule-row .icon-button { width: 32px; height: 32px; }
 .signout-button { margin-left: auto; width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #9199aa; display: grid; place-items: center; cursor: pointer; transition: background .15s ease, color .15s ease; }
 .signout-button:hover { background: #f1efff; color: #5f50c8; }
+
+.danger-button { border: 1px solid #f0d7dc; border-radius: 8px; background: #fff8f9; color: #bd596b; padding: 9px 12px; font-size: 10px; font-weight: 700; cursor: pointer; }
+.danger-button:hover { background: #fff0f2; border-color: #e8b8c2; }
+.portal-contest-picker { max-width: 1000px; margin: -8px 0 15px; }
+.portal-contest-picker label { display: grid; gap: 6px; color: #666f7d; font-size: 10px; font-weight: 600; max-width: 430px; }
+.portal-contest-picker select { height: 38px; border: 1px solid #e0e3e9; border-radius: 8px; padding: 0 10px; color: #4d5665; background: #fff; font-size: 11px; }
+.portal-empty { min-height: 390px; display: grid; place-items: center; }
+.portal-document-button { width: 100%; text-align: left; cursor: pointer; background: #fff; }
+.portal-document-button:hover:not(:disabled) { border-color: #c9c3f1; background: #fbfaff; }
+.portal-document-button:disabled { cursor: not-allowed; opacity: .6; }
+.portal-fields textarea { width: 100%; border: 1px solid #e0e3e9; border-radius: 8px; padding: 10px; color: #4d5665; background: #fafbfc; font-size: 11px; resize: vertical; }
+.portal-fields input[type="file"] { height: auto; padding: 9px; background: #fff; }
+.portal-error { margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; color: #ae5362; background: #fff3f5; border: 1px solid #f2d7dc; font-size: 10px; line-height: 1.4; }

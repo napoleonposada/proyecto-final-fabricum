@@ -43,35 +43,39 @@ function formatDate(value) {
   return value ? new Intl.DateTimeFormat('es-PE', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(value)) : '—'
 }
 
-async function loadRemoteState() {
-  const [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult] = await Promise.all([
+async function loadRemoteState(profile) {
+  const isSupplierProfile = profile?.role === 'PROVEEDOR' && Boolean(profile?.supplier_id)
+  const [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult] = await Promise.all([
     supabase.from('contests').select('id, code, title, status, reference_budget, currency_code, proposal_deadline'),
     supabase.from('suppliers').select('id, legal_name, tags, active, supplier_contacts(full_name, email, is_primary)'),
     supabase.from('contest_suppliers').select('contest_id, supplier_id'),
     supabase.from('proposals').select('id, contest_id, supplier_id, status, total_amount, submitted_at'),
     supabase.from('notifications').select('id, kind, title, body, severity, read_at, created_at').order('created_at', { ascending: false }),
-    supabase.from('contest_documents').select('contest_id, storage_path, version, text_validation_status').order('version', { ascending: false }),
+    supabase.from('contest_documents').select('id, contest_id, storage_path, version, text_validation_status').order('version', { ascending: false }),
     supabase.from('contest_milestones').select('contest_id, name, due_at, milestone_type').order('due_at'),
+    supabase.from('proposal_documents').select('id, proposal_id, document_type, storage_path, text_validation_status').order('created_at', { ascending: false }),
   ])
-  const firstError = [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult].find((item) => item.error)
+  const firstError = [contestsResult, suppliersResult, participantsResult, proposalsResult, notificationsResult, documentsResult, milestonesResult, proposalDocumentsResult].find((item) => item.error)
   if (firstError) throw firstError.error
   const suppliers = (suppliersResult.data || []).map((supplier) => ({ id: supplier.id, name: supplier.legal_name, email: supplier.supplier_contacts?.find((contact) => contact.is_primary)?.email || supplier.supplier_contacts?.[0]?.email || '—', segment: supplier.tags?.[0] || 'General', active: supplier.active }))
   const suppliersById = Object.fromEntries(suppliers.map((supplier) => [supplier.id, supplier]))
   const invitedByContest = {}
   for (const participant of participantsResult.data || []) invitedByContest[participant.contest_id] = (invitedByContest[participant.contest_id] || 0) + 1
   const documentsByContest = {}
-  for (const document of documentsResult.data || []) documentsByContest[document.contest_id] ||= document
+  for (const document of documentsResult.data || []) documentsByContest[document.contest_id] ||= { ...document, fileName: document.storage_path?.split('/').pop() || 'Bases del concurso' }
   const milestonesByContest = {}
   for (const milestone of milestonesResult.data || []) (milestonesByContest[milestone.contest_id] ||= []).push({ label: milestone.name, date: formatDate(milestone.due_at), dueAt: milestone.due_at, milestoneType: milestone.milestone_type, done: new Date(milestone.due_at) < new Date() })
+  const proposalDocumentsByProposal = {}
+  for (const document of proposalDocumentsResult.data || []) (proposalDocumentsByProposal[document.proposal_id] ||= []).push(document)
   const proposalsByContest = {}
-  for (const proposal of proposalsResult.data || []) (proposalsByContest[proposal.contest_id] ||= []).push({ ...proposal, supplier: suppliersById[proposal.supplier_id]?.name || 'Proveedor', amount: Number(proposal.total_amount), result: proposal.status === 'NO_APTA' ? 'NO_APTA' : proposal.status === 'APTA' ? 'APTA' : 'PENDIENTE', reason: 'Revisión pendiente de la evaluación IA.', review: 'Pendiente' })
+  for (const proposal of proposalsResult.data || []) (proposalsByContest[proposal.contest_id] ||= []).push({ ...proposal, supplier: suppliersById[proposal.supplier_id]?.name || 'Proveedor', amount: Number(proposal.total_amount), result: proposal.status === 'NO_APTA' ? 'NO_APTA' : proposal.status === 'APTA' ? 'APTA' : 'PENDIENTE', reason: 'Revisión pendiente de la evaluación IA.', review: 'Pendiente', technicalDocument: proposalDocumentsByProposal[proposal.id]?.find((document) => document.document_type === 'TECNICA') || null, economicDocument: proposalDocumentsByProposal[proposal.id]?.find((document) => document.document_type === 'ECONOMICA') || null })
   const contests = (contestsResult.data || []).map((contest) => {
     const offers = proposalsByContest[contest.id] || []
     const invited = invitedByContest[contest.id] || 0
-    return { id: contest.id, code: contest.code, title: contest.title, status: contest.status, statusLabel: contest.status, category: 'Proceso de contratación', budget: Number(contest.reference_budget), currency: contest.currency_code, deadline: contest.proposal_deadline || new Date().toISOString(), invited, submitted: offers.length, progress: invited ? Math.min(100, Math.round(offers.length / invited * 100)) : 0, manager: 'Gestor autenticado', bases: documentsByContest[contest.id]?.storage_path?.split('/').pop() || 'Bases pendientes de carga', requirements: 0, aiReady: offers.filter((offer) => offer.result !== 'PENDIENTE').length, milestones: milestonesByContest[contest.id] || [], offers }
+    return { id: contest.id, code: contest.code, title: contest.title, status: contest.status, statusLabel: contest.status, category: 'Proceso de contratación', budget: Number(contest.reference_budget), currency: contest.currency_code, deadline: contest.proposal_deadline || new Date().toISOString(), invited, submitted: offers.length, progress: invited ? Math.min(100, Math.round(offers.length / invited * 100)) : 0, manager: 'Gestor autenticado', bases: documentsByContest[contest.id]?.fileName || 'Bases pendientes de carga', baseDocument: documentsByContest[contest.id] || null, requirements: 0, aiReady: offers.filter((offer) => offer.result !== 'PENDIENTE').length, milestones: milestonesByContest[contest.id] || [], offers }
   })
   const notifications = (notificationsResult.data || []).map((notification) => ({ id: notification.id, type: notification.severity?.toLowerCase() === 'warning' ? 'warning' : notification.severity?.toLowerCase() === 'critical' ? 'warning' : 'info', title: notification.title, body: notification.body, time: formatDate(notification.created_at), unread: !notification.read_at }))
-  return { contests, suppliers, notifications, activity: [] }
+  return { contests: isSupplierProfile ? contests.filter((contest) => contest.status === 'ABIERTO') : contests, suppliers, notifications, activity: [] }
 }
 
 function App() {
@@ -92,8 +96,9 @@ function App() {
       let profile
       try { profile = await getCurrentProfile(user.id) } catch (profileError) { return setAuth({ loading: false, user: null, profile: null, error: `No se pudo cargar tu perfil: ${profileError.message}` }) }
       setAuth({ loading: false, user, profile, error: null })
+      setSection(profile?.role === 'PROVEEDOR' ? 'portal' : 'dashboard')
       try {
-        const remote = await loadRemoteState()
+        const remote = await loadRemoteState(profile)
         if (active) {
           setState(remote)
           if (remote.contests.length) setSelectedId(remote.contests[0].id)
@@ -113,6 +118,7 @@ function App() {
   const unread = state.notifications.filter((notification) => notification.unread).length
 
   useEffect(() => {
+    if (isSupplier && section !== 'portal') setSection('portal')
     if (!isSupplier && section === 'portal') setSection('dashboard')
   }, [isSupplier, section])
 
@@ -138,6 +144,26 @@ function App() {
     }
     setState((current) => ({ ...current, contests: current.contests.map((c) => c.id === selectedId ? { ...c, status: 'ABIERTO', statusLabel: 'Abierto' } : c) }))
     notify('El concurso quedó publicado y listo para invitar proveedores.')
+  }
+
+  const deleteDraftContest = async () => {
+    if (!selectedContest || selectedContest.status !== 'BORRADOR') return
+    if (!window.confirm(`¿Depurar el borrador “${selectedContest.title}”? Se eliminarán sus bases, cronograma e invitaciones.`)) return
+    if (!isDemoMode) {
+      const { data: documents, error: documentsError } = await supabase.from('contest_documents').select('storage_path').eq('contest_id', selectedContest.id)
+      if (documentsError) return notify(documentsError.message, 'error')
+      const paths = (documents || []).map((document) => document.storage_path).filter(Boolean)
+      if (paths.length) {
+        const { error: storageError } = await supabase.storage.from('contest-documents').remove(paths)
+        if (storageError) return notify(storageError.message, 'error')
+      }
+      const { error } = await supabase.from('contests').delete().eq('id', selectedContest.id).eq('status', 'BORRADOR')
+      if (error) return notify(error.message, 'error')
+    }
+    setState((current) => ({ ...current, contests: current.contests.filter((contest) => contest.id !== selectedContest.id) }))
+    setSelectedId((current) => state.contests.find((contest) => contest.id !== selectedContest.id)?.id || '')
+    setModal(null)
+    notify('Borrador depurado correctamente.')
   }
 
   const createContest = async (form) => {
@@ -241,19 +267,19 @@ function App() {
   }
 
   if (auth.loading) return <AuthLoading />
-  if (!auth.user) return <AuthScreen error={auth.error} onLogin={async (email, password) => { if (isDemoMode) { setAuth({ loading: false, user: { id: 'demo-manager', full_name: 'María Salazar' }, profile: { id: 'demo-manager', full_name: 'María Salazar', role: 'GESTOR', supplier_id: null }, error: null }); return }; const { data, error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw error; const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }} onRegister={async (fullName, email, password) => { if (isDemoMode) throw new Error('El registro no está disponible en modo demostración.'); const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } }); if (error) throw error; if (data.session && data.user) { const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }) }; return data }} />
+  if (!auth.user) return <AuthScreen error={auth.error} onLogin={async (email, password) => { if (isDemoMode) { setAuth({ loading: false, user: { id: 'demo-manager', full_name: 'María Salazar' }, profile: { id: 'demo-manager', full_name: 'María Salazar', role: 'GESTOR', supplier_id: null }, error: null }); return }; const { data, error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw error; const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }); setSection(profile?.role === 'PROVEEDOR' ? 'portal' : 'dashboard'); const remote = await loadRemoteState(profile); setState(remote); if (remote.contests.length) setSelectedId(remote.contests[0].id) }} onRegister={async (fullName, email, password) => { if (isDemoMode) throw new Error('El registro no está disponible en modo demostración.'); const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } }); if (error) throw error; if (data.session && data.user) { const profile = await getCurrentProfile(data.user.id); setAuth({ loading: false, user: data.user, profile, error: null }); setSection(profile?.role === 'PROVEEDOR' ? 'portal' : 'dashboard') }; return data }} />
 
   return (
     <div className="app-shell">
       <Sidebar section={section} setSection={setSection} unread={unread} isSupplier={isSupplier} profile={auth.profile} onSignOut={signOut} />
       <main className="main-content">
-        <Topbar unread={unread} demo={isDemoMode} onNotifications={() => setSection('notifications')} />
+        <Topbar unread={unread} demo={isDemoMode} supplier={isSupplier} onNotifications={() => setSection('notifications')} />
         <div className="content-wrap">
           {section === 'dashboard' && <DashboardView state={state} onNew={() => setModal('create')} onOpen={(id) => { setSelectedId(id); setSection('contests'); setDetailTab('resumen') }} />}
-          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onNotify={notify} />}
+          {section === 'contests' && <ContestWorkspace contests={state.contests} selected={selectedContest} selectedId={selectedId} setSelectedId={setSelectedId} detailTab={detailTab} setDetailTab={setDetailTab} onNew={() => setModal('create')} onInvite={() => setModal('invite')} onPublish={publishContest} onEdit={() => setModal('edit')} onDeleteDraft={deleteDraftContest} onNotify={notify} />}
           {section === 'suppliers' && <SuppliersView suppliers={state.suppliers} onInvite={() => { setSection('contests'); setModal('invite') }} />}
           {section === 'notifications' && <NotificationsView notifications={state.notifications} onRead={markRead} />}
-          {section === 'portal' && isSupplier && <SupplierPortal contest={state.contests.find((contest) => contest.status === 'ABIERTO') || state.contests[1]} onNotify={notify} />}
+          {section === 'portal' && isSupplier && <SupplierPortal contests={state.contests} supplier={auth.profile} user={auth.user} onNotify={notify} onStateRefresh={async () => { const remote = await loadRemoteState(auth.profile); setState(remote) }} />}
         </div>
       </main>
       {modal === 'create' && <CreateContestModal onClose={() => setModal(null)} onSubmit={createContest} />}
@@ -270,17 +296,16 @@ function Sidebar({ section, setSection, unread, isSupplier, profile, onSignOut }
     <div className="workspace-switcher"><div className="workspace-avatar">F</div><div><strong>Fabricum</strong><span>Área de compras</span></div><span className="chevron">⌄</span></div>
     <p className="nav-label">Espacio de trabajo</p>
     <nav className="side-nav">
-      {navItems.filter((item) => item.id !== 'portal' || isSupplier).map((item) => <button key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'notifications' && unread > 0 && <b className="nav-badge">{unread}</b>}</button>)}
+      {(isSupplier ? navItems.filter((item) => item.id === 'portal') : navItems.filter((item) => item.id !== 'portal')).map((item) => <button key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'notifications' && unread > 0 && <b className="nav-badge">{unread}</b>}</button>)}
     </nav>
     <div className="sidebar-spacer" />
-    <div className="calendar-connect"><div className="calendar-icon"><Icon name="calendar" size={17} /></div><div><strong>Calendar</strong><span>Conectado</span></div><span className="online-dot" /></div>
-    <button className="nav-item muted"><Icon name="settings" /><span>Configuración</span></button>
+    {!isSupplier && <><div className="calendar-connect"><div className="calendar-icon"><Icon name="calendar" size={17} /></div><div><strong>Calendar</strong><span>Conectado</span></div><span className="online-dot" /></div><button className="nav-item muted"><Icon name="settings" /><span>Configuración</span></button></>}
     <div className="user-card"><div className="user-avatar">{(profile?.full_name || 'Usuario').split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div><div><strong>{profile?.full_name || 'Usuario'}</strong><span>{profile?.role === 'PROVEEDOR' ? 'Proveedor' : 'Gestor'}</span></div><button type="button" className="signout-button" onClick={onSignOut} aria-label="Cerrar sesión" title="Cerrar sesión"><Icon name="logout" size={16} /></button></div>
   </aside>
 }
 
-function Topbar({ unread, demo, onNotifications }) {
-  return <header className="topbar"><div className="breadcrumb"><span>Área de compras</span><span className="slash">/</span><strong>Resumen</strong></div><div className="topbar-actions">{demo && <span className="demo-badge"><span className="demo-dot" />Modo demostración</span>}<button className="icon-button" onClick={onNotifications} aria-label="Notificaciones"><Icon name="bell" size={19} />{unread > 0 && <span className="notification-dot" />}</button><button className="help-button">?</button></div></header>
+function Topbar({ unread, demo, supplier, onNotifications }) {
+  return <header className="topbar"><div className="breadcrumb"><span>Área de compras</span><span className="slash">/</span><strong>{supplier ? 'Portal proveedor' : 'Resumen'}</strong></div><div className="topbar-actions">{demo && <span className="demo-badge"><span className="demo-dot" />Modo demostración</span>}{!supplier && <button className="icon-button" onClick={onNotifications} aria-label="Notificaciones"><Icon name="bell" size={19} />{unread > 0 && <span className="notification-dot" />}</button>}<button className="help-button">?</button></div></header>
 }
 
 function DashboardView({ state, onNew, onOpen }) {
@@ -309,15 +334,16 @@ function ActivityList({ items }) {
   return <div className="activity-list">{items.map((item, index) => <div className="activity-item" key={`${item.title}-${index}`}><div className={`activity-icon ${item.tone}`}><Icon name={item.icon} size={15} /></div><div><strong>{item.title}</strong><span>{item.detail}</span></div><span className="activity-time">{index === 0 ? 'Ahora' : 'Ayer'}</span></div>)}</div>
 }
 
-function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onNotify }) {
+function ContestWorkspace({ contests, selected, selectedId, setSelectedId, detailTab, setDetailTab, onNew, onInvite, onPublish, onEdit, onDeleteDraft, onNotify }) {
   const [query, setQuery] = useState('')
   const filtered = contests.filter((contest) => contest.title.toLowerCase().includes(query.toLowerCase()) || contest.code.toLowerCase().includes(query.toLowerCase()))
-  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onNotify={onNotify} /></section></div>
+  return <div className="workspace-grid"><section className="contest-list-panel"><div className="page-heading compact"><div><p className="eyebrow">Gestión de procesos</p><h1>Concursos</h1><p className="page-subtitle">Administra concursos, propuestas y adjudicaciones.</p></div><button className="primary-button" onClick={onNew}><Icon name="plus" size={17} />Nuevo</button></div><div className="list-toolbar"><div className="search-field"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar concurso..." /></div><button className="filter-button">Todos <span>⌄</span></button></div><div className="contest-list">{filtered.map((contest) => <button key={contest.id} className={`contest-list-item ${selectedId === contest.id ? 'selected' : ''}`} onClick={() => setSelectedId(contest.id)}><div className="contest-list-top"><span className="contest-code">{contest.code}</span><StatusPill status={contest.status} /></div><strong>{contest.title}</strong><span className="contest-list-category">{contest.category}</span><div className="contest-list-meta"><span><Icon name="users" size={13} />{contest.invited} invitados</span><span><Icon name="file" size={13} />{contest.submitted} propuestas</span></div></button>)}</div></section><section className="detail-panel"><ContestDetail contest={selected} detailTab={detailTab} setDetailTab={setDetailTab} onInvite={onInvite} onPublish={onPublish} onEdit={onEdit} onDeleteDraft={onDeleteDraft} onNotify={onNotify} /></section></div>
 }
 
-function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onNotify }) {
+function ContestDetail({ contest, detailTab, setDetailTab, onInvite, onPublish, onEdit, onDeleteDraft, onNotify }) {
   const tabs = [['resumen', 'Resumen'], ['propuestas', 'Propuestas'], ['evaluacion', 'Evaluación IA'], ['ranking', 'Ranking económico'], ['auditoria', 'Auditoría']]
-  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} />}{detailTab === 'ranking' && <Ranking contest={contest} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
+  if (!contest) return <div className="detail-body"><div className="sealed-empty"><div className="sealed-art soft"><Icon name="briefcase" size={24} /></div><h3>Selecciona un concurso</h3><p>Crea un nuevo concurso o elige uno de la lista para revisar su expediente.</p></div></div>
+  return <><div className="detail-heading"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h1>{contest.title}</h1><p>{contest.category} · Responsable: {contest.manager}</p></div><div className="detail-actions">{contest.status === 'BORRADOR' ? <><button className="secondary-button" onClick={onEdit}>Editar borrador</button><button className="danger-button" onClick={onDeleteDraft}>Depurar</button><button className="primary-button" onClick={onPublish}>Publicar concurso</button></> : <button className="secondary-button" onClick={onInvite}><Icon name="send" size={15} />Invitar proveedores</button>}<button className="more-button">•••</button></div></div><div className="detail-tabs">{tabs.map(([id, label]) => <button key={id} className={detailTab === id ? 'active' : ''} onClick={() => setDetailTab(id)}>{label}{id === 'propuestas' && <span className="tab-count">{contest.submitted}</span>}{id === 'evaluacion' && contest.aiReady > 0 && <span className="tab-count purple-count">{contest.aiReady}</span>}</button>)}</div>{detailTab === 'resumen' && <Overview contest={contest} onNotify={onNotify} />}{detailTab === 'propuestas' && <Proposals contest={contest} />}{detailTab === 'evaluacion' && <Evaluation contest={contest} onNotify={onNotify} />}{detailTab === 'ranking' && <Ranking contest={contest} />}{detailTab === 'auditoria' && <AuditLog contest={contest} />}</>
 }
 
 function Overview({ contest, onNotify }) {
@@ -358,30 +384,121 @@ function NotificationsView({ notifications, onRead }) {
   return <><div className="page-heading"><div><p className="eyebrow">Seguimiento</p><h1>Notificaciones</h1><p className="page-subtitle">Hitos, vencimientos y actividad de tus concursos.</p></div><button className="secondary-button"><Icon name="check" size={15} />Marcar todo como leído</button></div><section className="panel notifications-panel"><div className="notification-filters"><button className="active">Todas <span>{notifications.length}</span></button><button>No leídas <span>{notifications.filter((n) => n.unread).length}</span></button><button>Críticas</button></div><div className="full-notification-list">{notifications.map((notification) => <button className={`full-notification ${notification.unread ? 'unread' : ''}`} key={notification.id} onClick={() => onRead(notification.id)}><div className={`notification-type ${notification.type}`}><Icon name={notification.type === 'warning' ? 'clock' : notification.type === 'success' ? 'check' : 'bell'} size={17} /></div><div><strong>{notification.title}</strong><span>{notification.body}</span></div><time>{notification.time}</time>{notification.unread && <span className="unread-dot" />}</button>)}</div></section></>
 }
 
-function SupplierPortal({ contest: activeContest, onNotify }) {
-  const [submitted, setSubmittedState] = useState(false)
+function SupplierPortal({ contests = [], supplier, user, onNotify, onStateRefresh }) {
+  const [selectedContestId, setSelectedContestId] = useState(() => contests.find((item) => item.status === 'ABIERTO')?.id || '')
   const [step, setStep] = useState(1)
+  const [technicalFile, setTechnicalFile] = useState(null)
+  const [economicFile, setEconomicFile] = useState(null)
+  const [technicalSummary, setTechnicalSummary] = useState('')
+  const [amount, setAmount] = useState('')
+  const [taxesIncluded, setTaxesIncluded] = useState(true)
+  const [submitted, setSubmitted] = useState(false)
+  const [submittedAt, setSubmittedAt] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState(null)
-  const contest = activeContest || { id: 'c-015', code: 'CMP-2026-015', title: 'Implementación de plataforma de compras', category: 'Tecnología', deadline: new Date(Date.now() + 4 * 864e5).toISOString(), currency: 'PEN' }
+  const [downloadBusy, setDownloadBusy] = useState(false)
+  const availableContests = contests.filter((item) => item.status === 'ABIERTO')
+  const contest = availableContests.find((item) => item.id === selectedContestId) || null
+  const proposal = contest?.offers?.find((offer) => offer.supplier_id === supplier?.supplier_id) || contest?.offers?.[0] || null
+  const company = user?.user_metadata?.company || 'Proveedor registrado'
+  const contactEmail = user?.email || '—'
+  const technicalDocument = proposal?.technicalDocument
+  const economicDocument = proposal?.economicDocument
+
+  useEffect(() => {
+    if (!availableContests.some((item) => item.id === selectedContestId)) setSelectedContestId(availableContests[0]?.id || '')
+  }, [contests, selectedContestId])
+
+  useEffect(() => {
+    setStep(1)
+    setTechnicalFile(null)
+    setEconomicFile(null)
+    setTechnicalSummary('')
+    setAmount(proposal?.amount ? String(proposal.amount) : '')
+    setTaxesIncluded(true)
+    setSubmitted(proposal?.status === 'ENVIADA' || proposal?.status === 'APTA' || proposal?.status === 'NO_APTA')
+    setSubmittedAt(proposal?.submitted_at || null)
+    setSubmitError(null)
+  }, [selectedContestId, proposal?.id, proposal?.status, proposal?.amount, proposal?.submitted_at])
+
+  const choosePdf = (event, setter) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) return setSubmitError('Solo se aceptan archivos PDF.')
+    setSubmitError(null)
+    setter(file)
+  }
+
+  const downloadBases = async () => {
+    if (!contest?.baseDocument?.id) return onNotify('Este concurso todavía no tiene bases disponibles.', 'error')
+    setDownloadBusy(true)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const response = await fetch(`/api/documents/download-url?documentType=contest&documentId=${encodeURIComponent(contest.baseDocument.id)}`, { headers: { Authorization: `Bearer ${sessionData.session?.access_token || ''}` } })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'No se pudo generar la descarga')
+      window.open(payload.url, '_blank', 'noopener,noreferrer')
+    } catch (error) { onNotify(error.message, 'error') } finally { setDownloadBusy(false) }
+  }
+
+  const downloadReceipt = () => {
+    const receipt = [`Fabricum · Comprobante de recepción`, `Concurso: ${contest?.code || '—'}`, `Proveedor: ${company}`, `Correo: ${contactEmail}`, `Fecha y hora de servidor: ${submittedAt ? new Date(submittedAt).toISOString() : new Date().toISOString()}`, `Estado: Propuesta enviada`].join('\n')
+    const url = URL.createObjectURL(new Blob([receipt], { type: 'text/plain;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `comprobante-${contest?.code || 'propuesta'}.txt`
+    link.click()
+    URL.revokeObjectURL(url)
+    onNotify('Comprobante descargado.')
+  }
+
+  const uploadProposalDocument = async ({ proposalId, file, documentType, headers }) => {
+    if (!file) return null
+    const uploadResponse = await fetch('/api/documents/upload-url', { method: 'POST', headers, body: JSON.stringify({ documentType: 'proposal', fileName: file.name }) })
+    const upload = await uploadResponse.json()
+    if (!uploadResponse.ok) throw new Error(upload.error || 'No se pudo preparar el documento')
+    const { error: storageError } = await supabase.storage.from(upload.bucket).uploadToSignedUrl(upload.path, upload.token, file)
+    if (storageError) throw storageError
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+    const sha256 = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
+    const { data: document, error: documentError } = await supabase.from('proposal_documents').upsert({ proposal_id: proposalId, document_type: documentType, storage_path: upload.path, sha256, text_validation_status: 'PENDIENTE' }, { onConflict: 'proposal_id,document_type' }).select('id').single()
+    if (documentError) throw documentError
+    const validationResponse = await fetch('/api/documents/validate-pdf', { method: 'POST', headers, body: JSON.stringify({ documentType: 'proposal', documentId: document.id }) })
+    const validation = await validationResponse.json()
+    if (!validationResponse.ok) throw new Error(validation.reason || validation.error || 'El PDF fue rechazado')
+    return document
+  }
+
   const submitProposal = async () => {
-    if (isDemoMode) return setSubmittedState(true)
+    if (!contest) return
+    const numericAmount = Number(amount)
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) return setSubmitError('Indica un monto económico válido.')
+    if (numericAmount > contest.budget) return setSubmitError(`La oferta no puede superar el presupuesto de ${formatCurrency(contest.budget, contest.currency)}.`)
+    if (!taxesIncluded) return setSubmitError('Debes confirmar que el precio incluye impuestos.')
+    if (!technicalFile && technicalDocument?.text_validation_status !== 'VALIDO') return setSubmitError('Carga la propuesta técnica en PDF con texto seleccionable.')
+    if (!economicFile && economicDocument?.text_validation_status !== 'VALIDO') return setSubmitError('Carga la propuesta económica en PDF con texto seleccionable.')
+    if (isDemoMode) { setSubmitted(true); setSubmittedAt(new Date().toISOString()); return }
     setSubmitting(true); setSubmitError(null)
     try {
       const { data: sessionData } = await supabase.auth.getSession()
       const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }
-      const draftResponse = await fetch('/api/proposals/create', { method: 'POST', headers, body: JSON.stringify({ contestId: contest.id, totalAmount: 142000, currencyCode: contest.currency || 'PEN', taxesIncluded: true, technicalSummary: 'Propuesta técnica validada por el portal.' }) })
+      const draftResponse = await fetch('/api/proposals/create', { method: 'POST', headers, body: JSON.stringify({ contestId: contest.id, totalAmount: numericAmount, currencyCode: contest.currency || 'PEN', taxesIncluded: true, technicalSummary }) })
       const draft = await draftResponse.json()
-      if (!draftResponse.ok) throw new Error(draft.error || 'No se pudo crear el borrador')
-      const finalResponse = await fetch('/api/proposals/finalize', { method: 'POST', headers, body: JSON.stringify({ proposalId: draft.proposal.id }) })
+      if (!draftResponse.ok) throw new Error(draft.error || 'No se pudo guardar la propuesta')
+      const proposalId = draft.proposal.id
+      if (technicalFile) await uploadProposalDocument({ proposalId, file: technicalFile, documentType: 'TECNICA', headers })
+      if (economicFile) await uploadProposalDocument({ proposalId, file: economicFile, documentType: 'ECONOMICA', headers })
+      const finalResponse = await fetch('/api/proposals/finalize', { method: 'POST', headers, body: JSON.stringify({ proposalId }) })
       const final = await finalResponse.json()
       if (!finalResponse.ok) throw new Error(final.error || 'No se pudo enviar la propuesta')
-      setSubmittedState(true)
+      setSubmitted(true); setSubmittedAt(final.proposal?.submitted_at || new Date().toISOString()); await onStateRefresh?.(); onNotify('Propuesta enviada y sellada correctamente.')
     } catch (error) { setSubmitError(error.message) } finally { setSubmitting(false) }
   }
-  const setSubmitted = (value) => { if (value === true && !isDemoMode) return submitProposal(); setSubmittedState(value) }
-  useEffect(() => { if (submitError) onNotify(submitError, 'error') }, [submitError])
-  return <><div className="page-heading"><div><p className="eyebrow">Acceso de proveedor · demostración</p><h1>Portal proveedor</h1><p className="page-subtitle">Presenta tu propuesta de forma segura y recibe tu comprobante.</p></div><span className="supplier-session"><span />Sesión autenticada</span></div><section className="portal-card"><div className="portal-card-header"><div><div className="detail-code"><span>CMP-2026-015</span><StatusPill status="ABIERTO" /></div><h2>Implementación de plataforma de compras</h2><p>Área de Tecnología · Fabricum</p></div><div className="portal-deadline"><span>Plazo de entrega</span><strong>23 sep 2026, 18:00</strong><small>Faltan 4 días</small></div></div><div className="portal-body"><div className="portal-stepper">{[['1', 'Datos'], ['2', 'Técnica'], ['3', 'Económica'], ['4', 'Confirmar']].map(([number, label], index) => <div className={`portal-step ${step > index ? 'done' : ''} ${step === index + 1 ? 'current' : ''}`} key={number}><span>{step > index + 1 ? <Icon name="check" size={12} /> : number}</span><strong>{label}</strong></div>)}</div>{submitted ? <div className="receipt-card"><div className="receipt-check"><Icon name="check" size={25} /></div><h3>Propuesta enviada correctamente</h3><p>Tu propuesta fue sellada con fecha y hora de servidor. No es posible reemplazarla.</p><div className="receipt-number"><span>Comprobante</span><strong>REC-2026-015-008</strong><small>19 sep 2026 · 09:58:41 (America/Lima)</small></div><button className="secondary-button" onClick={() => onNotify('El comprobante está listo para descargar.') }><Icon name="download" size={15} />Descargar comprobante</button></div> : <div className="portal-form-area"><div className="portal-form-main"><h3>{step === 1 ? 'Datos de presentación' : step === 2 ? 'Propuesta técnica' : step === 3 ? 'Oferta económica' : 'Confirmación final'}</h3><p className="form-help">{step === 1 ? 'Confirma los datos de la empresa que presentará la propuesta.' : step === 2 ? 'Carga un PDF con texto seleccionable. Los escaneos serán rechazados.' : step === 3 ? 'El monto debe estar en PEN e incluir todos los impuestos.' : 'Revisa la información antes del envío definitivo.'}</p>{step === 1 && <div className="portal-fields"><label>Empresa<input value="Servicios Andinos S.A.C." readOnly /></label><label>Contacto comercial<input value="Ana Torres · ana@andinos.pe" readOnly /></label></div>}{step === 2 && <div className="upload-box portal-upload"><Icon name="file" size={21} /><div><strong>Propuesta_tecnica.pdf</strong><span>PDF · 2.4 MB · Texto validado</span></div><span className="doc-status"><Icon name="check" size={13} />Válido</span></div>}{step === 3 && <div className="portal-fields"><label>Monto total con impuestos<input value="142000" readOnly /><small>Moneda fijada por el concurso: PEN</small></label><label className="check-line"><input type="checkbox" checked readOnly /> Confirmo que el precio incluye impuestos</label></div>}{step === 4 && <div className="final-review"><div><span>Propuesta técnica</span><strong>Propuesta_tecnica.pdf · Válida</strong></div><div><span>Oferta económica</span><strong>S/ 142,000 · Impuestos incluidos</strong></div><div className="final-warning"><Icon name="lock" size={15} /><span>Después de enviar no podrás modificar ni reemplazar tu propuesta.</span></div></div>}<div className="portal-actions">{step > 1 && <button className="secondary-button" onClick={() => setStep(step - 1)}>Atrás</button>}<button className="primary-button" onClick={() => step < 4 ? setStep(step + 1) : setSubmitted(true)}>{step < 4 ? 'Continuar' : 'Enviar propuesta'} <Icon name="arrow" size={15} /></button></div></div><aside className="portal-side"><h4>Documentos del concurso</h4><div className="portal-document"><Icon name="file" size={16} /><div><strong>Bases_Plataforma_Compras.pdf</strong><span>Versión 1 · 3.8 MB</span></div><Icon name="download" size={15} /></div><div className="portal-help"><span>i</span><p>¿Tienes dudas? Revisa las bases antes de enviar tu propuesta.</p></div></aside></div>}</div></section></>
+
+  if (!contest) return <><div className="page-heading"><div><p className="eyebrow">Acceso de proveedor</p><h1>Portal proveedor</h1><p className="page-subtitle">Tu cuenta está habilitada para presentar propuestas en concursos invitados.</p></div><span className="supplier-session"><span />Sesión autenticada</span></div><section className="portal-card portal-empty"><div className="sealed-empty"><div className="sealed-art soft"><Icon name="briefcase" size={24} /></div><h3>No tienes concursos abiertos</h3><p>Cuando el gestor te invite a un concurso publicado, aparecerá aquí con sus bases y plazo de presentación.</p></div></section></>
+
+  const daysRemaining = Math.max(0, Math.ceil((new Date(contest.deadline).getTime() - Date.now()) / 864e5))
+  return <><div className="page-heading"><div><p className="eyebrow">Acceso de proveedor</p><h1>Portal proveedor</h1><p className="page-subtitle">Presenta propuestas únicamente en concursos a los que has sido invitado.</p></div><span className="supplier-session"><span />Sesión autenticada</span></div>{availableContests.length > 1 && <div className="portal-contest-picker"><label>Concurso seleccionado<select value={selectedContestId} onChange={(event) => setSelectedContestId(event.target.value)}>{availableContests.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.title}</option>)}</select></label></div>}<section className="portal-card"><div className="portal-card-header"><div><div className="detail-code"><span>{contest.code}</span><StatusPill status={contest.status} /></div><h2>{contest.title}</h2><p>{contest.category} · Fabricum</p></div><div className="portal-deadline"><span>Plazo de entrega</span><strong>{formatDate(contest.deadline)}</strong><small>{daysRemaining ? `Faltan ${daysRemaining} días` : 'Plazo vencido'}</small></div></div><div className="portal-body"><div className="portal-stepper">{[['1', 'Datos'], ['2', 'Técnica'], ['3', 'Económica'], ['4', 'Confirmar']].map(([number, label], index) => <div className={`portal-step ${step > index ? 'done' : ''} ${step === index + 1 ? 'current' : ''}`} key={number}><span>{step > index + 1 ? <Icon name="check" size={12} /> : number}</span><strong>{label}</strong></div>)}</div>{submitted ? <div className="receipt-card"><div className="receipt-check"><Icon name="check" size={25} /></div><h3>Propuesta enviada correctamente</h3><p>Tu propuesta fue sellada con fecha y hora de servidor. No es posible reemplazarla.</p><div className="receipt-number"><span>Concurso</span><strong>{contest.code}</strong><small>{submittedAt ? `${formatDate(submittedAt)} · ${new Date(submittedAt).toLocaleTimeString('es-PE')}` : 'Registro confirmado'}</small></div><button className="secondary-button" onClick={downloadReceipt}><Icon name="download" size={15} />Descargar comprobante</button></div> : <div className="portal-form-area"><div className="portal-form-main"><h3>{step === 1 ? 'Datos de presentación' : step === 2 ? 'Propuesta técnica' : step === 3 ? 'Oferta económica' : 'Confirmación final'}</h3><p className="form-help">{step === 1 ? 'Verifica los datos de la empresa que presentará la propuesta.' : step === 2 ? 'Carga un PDF con texto seleccionable. Los escaneos serán rechazados automáticamente.' : step === 3 ? 'El monto debe estar en PEN e incluir todos los impuestos.' : 'Revisa la información antes del envío definitivo.'}</p>{step === 1 && <div className="portal-fields"><label>Empresa<input value={company} readOnly /></label><label>Contacto comercial<input value={contactEmail} readOnly /></label></div>}{step === 2 && <div className="portal-fields"><label>Propuesta técnica PDF<input type="file" accept="application/pdf,.pdf" onChange={(event) => choosePdf(event, setTechnicalFile)} /><small>{technicalFile?.name || (technicalDocument?.text_validation_status === 'VALIDO' ? 'Documento técnico validado anteriormente.' : 'El PDF no puede ser escaneado.')}</small></label><label>Resumen técnico<textarea value={technicalSummary} onChange={(event) => setTechnicalSummary(event.target.value)} placeholder="Describe brevemente el alcance y la solución propuesta." rows="4" /></label></div>}{step === 3 && <div className="portal-fields"><label>Monto total con impuestos<input type="number" min="0.01" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" /><small>Presupuesto máximo: {formatCurrency(contest.budget, contest.currency)} · Moneda: {contest.currency}</small></label><label>Propuesta económica PDF<input type="file" accept="application/pdf,.pdf" onChange={(event) => choosePdf(event, setEconomicFile)} /><small>{economicFile?.name || (economicDocument?.text_validation_status === 'VALIDO' ? 'Documento económico validado anteriormente.' : 'Incluye el monto ofertado y la confirmación de impuestos.')}</small></label><label className="check-line"><input type="checkbox" checked={taxesIncluded} onChange={(event) => setTaxesIncluded(event.target.checked)} /> Confirmo que el precio incluye impuestos</label></div>}{step === 4 && <div className="final-review"><div><span>Empresa</span><strong>{company}</strong></div><div><span>Propuesta técnica</span><strong>{technicalFile?.name || 'Documento técnico validado'}</strong></div><div><span>Oferta económica</span><strong>{formatCurrency(Number(amount), contest.currency)} · Impuestos incluidos</strong></div><div><span>Documento económico</span><strong>{economicFile?.name || 'Documento económico validado'}</strong></div><div className="final-warning"><Icon name="lock" size={15} /><span>Después de enviar no podrás modificar ni reemplazar tu propuesta.</span></div></div>}{submitError && <p className="portal-error">{submitError}</p>}<div className="portal-actions">{step > 1 && <button className="secondary-button" onClick={() => setStep(step - 1)} disabled={submitting}>Atrás</button>}<button className="primary-button" onClick={() => step < 4 ? setStep(step + 1) : submitProposal()} disabled={submitting}>{submitting ? 'Enviando…' : step < 4 ? 'Continuar' : 'Enviar propuesta'} <Icon name="arrow" size={15} /></button></div></div><aside className="portal-side"><h4>Documentos del concurso</h4><button className="portal-document portal-document-button" onClick={downloadBases} disabled={downloadBusy || !contest.baseDocument?.id}><Icon name="file" size={16} /><div><strong>{contest.bases}</strong><span>Versión {contest.baseDocument?.version || '—'} · Texto validado</span></div><Icon name="download" size={15} /></button><div className="portal-help"><span>i</span><p>¿Tienes dudas? Revisa las bases antes de enviar tu propuesta.</p></div></aside></div>}</div></section></>
 }
 
 function Modal({ title, subtitle, children, onClose, wide = false }) { return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className={`modal ${wide ? 'modal-wide' : ''}`}><div className="modal-header"><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><Icon name="close" size={18} /></button></div>{children}</div></div> }
