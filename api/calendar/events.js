@@ -13,11 +13,12 @@ async function getAccessToken(refreshToken) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return json(res, { error: 'Método no permitido' }, 405)
+  if (!['GET', 'POST'].includes(req.method)) return json(res, { error: 'Método no permitido' }, 405)
   try {
     const { user } = await getAuthenticatedUser(req)
     const admin = createAdminClient()
     const { data: connection, error: connectionError } = await admin.from('calendar_connections').select('id, calendar_id, encrypted_refresh_token').eq('user_id', user.id).eq('provider', 'google').single()
+    if (req.method === 'GET') return json(res, { connected: !connectionError && Boolean(connection), calendarId: connection?.calendar_id || null })
     if (connectionError || !connection) return json(res, { error: 'Conecta primero tu Google Calendar personal' }, 409)
     const { contestId } = req.body || {}
     if (!contestId) return json(res, { error: 'contestId es obligatorio' }, 400)

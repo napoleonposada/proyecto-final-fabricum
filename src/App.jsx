@@ -48,7 +48,7 @@ async function getCalendarStatus() {
   const { data: sessionData } = await supabase.auth.getSession()
   const token = sessionData.session?.access_token
   if (!token) return { connected: false }
-  const response = await fetch('/api/calendar/status', { headers: { Authorization: `Bearer ${token}` } })
+  const response = await fetch('/api/calendar/events', { headers: { Authorization: `Bearer ${token}` } })
   const payload = await response.json()
   if (!response.ok) throw new Error(payload.error || 'No se pudo consultar Calendar')
   return payload
