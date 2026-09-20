@@ -99,6 +99,8 @@ async function reviewProposal(req, res, body) {
     resolvedRunId = latestRun?.id
   }
   if (!resolvedRunId) return json(res, { error: 'Ejecuta la evaluación IA antes de confirmar' }, 409)
+  const { data: run, error: runError } = await admin.from('ai_evaluation_runs').select('id, proposal_id').eq('id', resolvedRunId).eq('proposal_id', proposalId).single()
+  if (runError || !run) return json(res, { error: 'La evaluación indicada no corresponde a esta propuesta' }, 400)
   const { data: review, error: reviewError } = await admin.from('human_reviews').insert({ run_id: resolvedRunId, reviewer_id: user.id, decision, reason: String(reason).trim() }).select('id, run_id, decision, reason, created_at').single()
   if (reviewError) throw reviewError
   const { data: updatedProposal, error: updateError } = await admin.from('proposals').update({ status: decision }).eq('id', proposalId).select('id, status').single()
