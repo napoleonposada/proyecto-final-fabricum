@@ -1,8 +1,5 @@
-import path from 'node:path'
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { WorkerMessageHandler } from 'pdfjs-dist/legacy/build/pdf.worker.mjs'
 
-const require = createRequire(import.meta.url)
 let canvasReady = false
 let workerReady = false
 let pdfParseClass
@@ -16,13 +13,11 @@ async function ensurePdfRuntime() {
     if (!globalThis.Path2D && canvas.Path2D) globalThis.Path2D = canvas.Path2D
     canvasReady = true
 
-    // PDF.js intenta cargar un worker relativo a su propio bundle. Ese archivo
-    // puede quedar fuera del bundle de una función serverless, por lo que se
-    // configura explícitamente mediante una URL file:// resoluble en Vercel.
+    // En Node, PDF.js puede ejecutar el worker en el mismo proceso. Registrar
+    // el manejador importado estáticamente evita cualquier búsqueda de archivos
+    // dentro de node_modules durante la ejecución de la función serverless.
+    globalThis.pdfjsWorker = { WorkerMessageHandler }
     const { PDFParse } = await import('pdf-parse')
-    const pdfjsEntry = require.resolve('pdfjs-dist/legacy/build/pdf.mjs')
-    const workerPath = path.join(path.dirname(pdfjsEntry), 'pdf.worker.mjs')
-    PDFParse.setWorker(pathToFileURL(workerPath).href)
     pdfParseClass = PDFParse
     workerReady = true
     return PDFParse
