@@ -1,4 +1,3 @@
-import { PDFParse } from 'pdf-parse'
 import { createAdminClient, getAuthenticatedUser, json } from '../_lib/supabaseServer.js'
 
 const bucketByType = { contest: 'contest-documents', proposal: 'proposal-documents' }
@@ -24,6 +23,9 @@ export default async function handler(req, res) {
     if (!bucketByType[documentType] || (!documentId && !storagePath)) return json(res, { error: 'documentType y documentId o storagePath son obligatorios' }, 400)
     const { table, row } = await readDocument(req, documentType, documentId, storagePath)
     const admin = createAdminClient()
+    // Cargar pdf-parse bajo demanda para no romper la inicialización de la
+    // función serverless en solicitudes que no procesan documentos.
+    const { PDFParse } = await import('pdf-parse')
     const { data: file, error: downloadError } = await admin.storage.from(bucketByType[documentType]).download(row.storage_path)
     if (downloadError) throw downloadError
     const parser = new PDFParse({ data: new Uint8Array(await file.arrayBuffer()) })
