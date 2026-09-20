@@ -60,7 +60,12 @@ async function loadRemoteState(profile) {
   const suppliers = (suppliersResult.data || []).map((supplier) => ({ id: supplier.id, name: supplier.legal_name, email: supplier.supplier_contacts?.find((contact) => contact.is_primary)?.email || supplier.supplier_contacts?.[0]?.email || '—', segment: supplier.tags?.[0] || 'General', active: supplier.active }))
   const suppliersById = Object.fromEntries(suppliers.map((supplier) => [supplier.id, supplier]))
   const invitedByContest = {}
-  for (const participant of participantsResult.data || []) invitedByContest[participant.contest_id] = (invitedByContest[participant.contest_id] || 0) + 1
+  const invitedSupplierIdsByContest = {}
+  for (const participant of participantsResult.data || []) {
+    invitedByContest[participant.contest_id] = (invitedByContest[participant.contest_id] || 0) + 1
+    if (!invitedSupplierIdsByContest[participant.contest_id]) invitedSupplierIdsByContest[participant.contest_id] = []
+    invitedSupplierIdsByContest[participant.contest_id].push(participant.supplier_id)
+  }
   const documentsByContest = {}
   for (const document of documentsResult.data || []) documentsByContest[document.contest_id] ||= { ...document, fileName: document.storage_path?.split('/').pop() || 'Bases del concurso' }
   const milestonesByContest = {}
@@ -72,7 +77,7 @@ async function loadRemoteState(profile) {
   const contests = (contestsResult.data || []).map((contest) => {
     const offers = proposalsByContest[contest.id] || []
     const invited = invitedByContest[contest.id] || 0
-    return { id: contest.id, code: contest.code, title: contest.title, status: contest.status, statusLabel: contest.status, category: 'Proceso de contratación', budget: Number(contest.reference_budget), currency: contest.currency_code, deadline: contest.proposal_deadline || new Date().toISOString(), invited, submitted: offers.length, progress: invited ? Math.min(100, Math.round(offers.length / invited * 100)) : 0, manager: 'Gestor autenticado', bases: documentsByContest[contest.id]?.fileName || 'Bases pendientes de carga', baseDocument: documentsByContest[contest.id] || null, requirements: 0, aiReady: offers.filter((offer) => offer.result !== 'PENDIENTE').length, milestones: milestonesByContest[contest.id] || [], offers }
+    return { id: contest.id, code: contest.code, title: contest.title, status: contest.status, statusLabel: contest.status, category: 'Proceso de contratación', budget: Number(contest.reference_budget), currency: contest.currency_code, deadline: contest.proposal_deadline || new Date().toISOString(), invited, invitedSupplierIds: invitedSupplierIdsByContest[contest.id] || [], submitted: offers.length, progress: invited ? Math.min(100, Math.round(offers.length / invited * 100)) : 0, manager: 'Gestor autenticado', bases: documentsByContest[contest.id]?.fileName || 'Bases pendientes de carga', baseDocument: documentsByContest[contest.id] || null, requirements: 0, aiReady: offers.filter((offer) => offer.result !== 'PENDIENTE').length, milestones: milestonesByContest[contest.id] || [], offers }
   })
   const notifications = (notificationsResult.data || []).map((notification) => ({ id: notification.id, type: notification.severity?.toLowerCase() === 'warning' ? 'warning' : notification.severity?.toLowerCase() === 'critical' ? 'warning' : 'info', title: notification.title, body: notification.body, time: formatDate(notification.created_at), unread: !notification.read_at }))
   return { contests: isSupplierProfile ? contests.filter((contest) => contest.status === 'ABIERTO') : contests, suppliers, notifications, activity: [] }
@@ -244,21 +249,27 @@ function App() {
     notify('Borrador actualizado correctamente.')
   }
 
-  const sendInvitations = async (count) => {
+  const sendInvitations = async (supplierIds) => {
+    const selectedSupplierIds = [...new Set(Array.isArray(supplierIds) ? supplierIds : [])]
+    if (!selectedSupplierIds.length) return notify('Selecciona al menos un proveedor.', 'error')
+    let sentCount = selectedSupplierIds.length
+    let alreadyInvitedCount = 0
     if (!isDemoMode) {
       const { data: sessionData } = await supabase.auth.getSession()
-      const response = await fetch('/api/invitations/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }, body: JSON.stringify({ contestId: selectedId, count }) })
+      const response = await fetch('/api/invitations/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token || ''}` }, body: JSON.stringify({ contestId: selectedId, supplierIds: selectedSupplierIds }) })
       const payload = await response.json()
       if (!response.ok) return notify(payload.error || 'No se pudo procesar el envío', 'error')
+      sentCount = payload.count || 0
+      alreadyInvitedCount = payload.alreadyInvitedCount || 0
     }
     setState((current) => ({
       ...current,
-      contests: current.contests.map((c) => c.id === selectedId ? { ...c, invited: c.invited + count } : c),
-      activity: [{ title: 'Invitaciones simuladas enviadas', detail: `${selectedContest.code} · ${count} proveedores`, icon: 'send', tone: 'blue' }, ...current.activity],
-      notifications: [{ id: `n-${Date.now()}`, type: 'success', title: 'Envío simulado completado', body: `${count} invitaciones de ${selectedContest.code} fueron procesadas.`, time: 'Ahora', unread: true }, ...current.notifications],
+      contests: current.contests.map((c) => c.id === selectedId ? { ...c, invited: c.invited + sentCount, invitedSupplierIds: [...new Set([...(c.invitedSupplierIds || []), ...selectedSupplierIds])] } : c),
+      activity: [{ title: 'Invitaciones procesadas', detail: `${selectedContest.code} · ${sentCount} proveedores`, icon: 'send', tone: 'blue' }, ...current.activity],
+      notifications: [{ id: `n-${Date.now()}`, type: 'success', title: 'Invitaciones procesadas', body: `${sentCount} invitaciones de ${selectedContest.code} fueron procesadas${alreadyInvitedCount ? `; ${alreadyInvitedCount} ya estaban invitadas.` : '.'}`, time: 'Ahora', unread: true }, ...current.notifications],
     }))
     setModal(null)
-    notify(`Se simularon ${count} invitaciones correctamente.`)
+    notify(sentCount ? `Se procesaron ${sentCount} invitaciones${alreadyInvitedCount ? `; ${alreadyInvitedCount} ya estaban registradas.` : '.'}` : 'Los proveedores seleccionados ya estaban invitados.')
   }
 
   const markRead = async (id) => {
@@ -284,7 +295,7 @@ function App() {
       </main>
       {modal === 'create' && <CreateContestModal onClose={() => setModal(null)} onSubmit={createContest} />}
       {modal === 'edit' && selectedContest?.status === 'BORRADOR' && <CreateContestModal mode="edit" initialContest={selectedContest} onClose={() => setModal(null)} onSubmit={updateDraftContest} />}
-      {modal === 'invite' && <InviteModal contest={selectedContest} onClose={() => setModal(null)} onSubmit={sendInvitations} />}
+      {modal === 'invite' && <InviteModal contest={selectedContest} suppliers={state.suppliers} onClose={() => setModal(null)} onSubmit={sendInvitations} />}
       {toast && <div className={`toast toast-${toast.tone}`}><Icon name="check" size={16} />{toast.message}</div>}
     </div>
   )
@@ -538,9 +549,21 @@ function LegacyCreateContestModal({ onClose, onSubmit }) {
   return <Modal title="Nuevo concurso" subtitle="Crea un borrador y completa el expediente antes de publicar." onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSubmit(form) }}><label>Nombre del concurso<input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ej. Servicio de limpieza" /></label><div className="form-row"><label>Categoría<select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}><option>Servicios generales</option><option>Tecnología</option><option>Suministros</option><option>Consultoría</option></select></label><label>Presupuesto referencial<input required type="number" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} placeholder="0" /><small>Moneda: PEN · impuestos incluidos</small></label></div><label>Bases del concurso <span className="label-note">PDF con texto seleccionable</span><div className="upload-box"><Icon name="file" size={20} /><div><strong>Arrastra el PDF aquí</strong><span>Los documentos escaneados serán rechazados.</span></div><button type="button" className="secondary-button">Seleccionar archivo</button></div></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" type="submit">Crear borrador <Icon name="arrow" size={15} /></button></div></form></Modal>
 }
 
-function InviteModal({ contest, onClose, onSubmit }) {
-  const [count, setCount] = useState(12)
-  return <Modal title="Invitar proveedores" subtitle={`${contest.code} · envío simulado para demostración`} onClose={onClose}><div className="invite-summary"><div className="invite-icon"><Icon name="send" size={22} /></div><div><strong>Envío seguro y segmentado</strong><span>Cada proveedor recibirá un enlace de un solo uso con fecha de vencimiento.</span></div></div><div className="segment-selector"><span>Segmento seleccionado</span><button className="segment-choice"><span className="segment-dot" />Proveedores de {contest.category}<span>⌄</span></button></div><div className="invite-count"><span>Contactos a invitar</span><strong>{count}</strong><div className="count-controls"><button onClick={() => setCount(Math.max(1, count - 1))}>−</button><button onClick={() => setCount(count + 1)}>+</button></div></div><div className="simulation-note"><span>i</span><p>El correo no se enviará externamente. Se generará un registro en la bandeja de simulación para revisar la plantilla y el enlace.</p></div><div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" onClick={() => onSubmit(count)}>Simular envío <Icon name="send" size={15} /></button></div></Modal>
+function InviteModal({ contest, suppliers = [], onClose, onSubmit }) {
+  const demoSuppliers = [
+    { id: 'demo-andinos', name: 'Servicios Andinos S.A.C.', email: 'contacto@andinos.pe', segment: 'Servicios generales', active: true },
+    { id: 'demo-norte', name: 'Grupo Norte E.I.R.L.', email: 'comercial@gruponorte.pe', segment: 'Tecnología', active: true },
+    { id: 'demo-delta', name: 'Mantenimiento Delta S.R.L.', email: 'ventas@delta.pe', segment: 'Servicios generales', active: true },
+    { id: 'demo-360', name: 'Soluciones 360 S.A.C.', email: 'hola@soluciones360.pe', segment: 'Tecnología', active: true },
+  ]
+  const allSuppliers = suppliers.length ? suppliers : demoSuppliers
+  const invitedIds = new Set(contest.invitedSupplierIds || [])
+  const availableSuppliers = allSuppliers.filter((supplier) => supplier.active !== false)
+  const [selectedIds, setSelectedIds] = useState(() => availableSuppliers.filter((supplier) => !invitedIds.has(supplier.id)).map((supplier) => supplier.id))
+  const toggleSupplier = (supplierId) => setSelectedIds((current) => current.includes(supplierId) ? current.filter((id) => id !== supplierId) : [...current, supplierId])
+  const selectableIds = availableSuppliers.filter((supplier) => !invitedIds.has(supplier.id)).map((supplier) => supplier.id)
+  const allSelected = selectableIds.length > 0 && selectableIds.every((supplierId) => selectedIds.includes(supplierId))
+  return <Modal title="Invitar proveedores" subtitle={`${contest.code} · selecciona los contactos para este concurso`} onClose={onClose} wide><div className="invite-summary"><div className="invite-icon"><Icon name="send" size={22} /></div><div><strong>Envío seguro y segmentado</strong><span>Cada proveedor recibirá un enlace de un solo uso con fecha de vencimiento hasta el cierre del concurso.</span></div></div><div className="segment-selector"><span>Proveedores registrados</span><button type="button" className="segment-choice" onClick={() => setSelectedIds(allSelected ? [] : selectableIds)}><span className="segment-dot" />{allSelected ? 'Quitar selección' : 'Seleccionar todos los disponibles'}<span>{selectedIds.length} seleccionados</span></button></div><div className="supplier-selection">{availableSuppliers.map((supplier) => { const alreadyInvited = invitedIds.has(supplier.id); return <label className={`supplier-option ${alreadyInvited ? 'already-invited' : ''}`} key={supplier.id}><input type="checkbox" checked={alreadyInvited || selectedIds.includes(supplier.id)} disabled={alreadyInvited} onChange={() => toggleSupplier(supplier.id)} /><span className="supplier-option-main"><strong>{supplier.name}</strong><small>{supplier.email} · {supplier.segment || 'General'}</small></span>{alreadyInvited && <em>Ya invitado</em>}</label> })}</div><div className="invite-count"><span>Contactos nuevos a invitar</span><strong>{selectedIds.filter((id) => !invitedIds.has(id)).length}</strong></div><div className="simulation-note"><span>i</span><p>El correo está configurado en modo mock para esta demostración. Se registrará el envío, el token seguro y el enlace del portal sin enviar mensajes externos.</p></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button type="button" className="primary-button" disabled={!selectedIds.length} onClick={() => onSubmit(selectedIds.filter((id) => !invitedIds.has(id)))}>Enviar invitaciones <Icon name="send" size={15} /></button></div></Modal>
 }
 
 function AuthLoading() {
